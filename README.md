@@ -50,6 +50,19 @@ python app.py
 uvicorn app:app --host 0.0.0.0 --port 8765
 ```
 
+### GPU 加速
+
+转写会自动使用 GPU（若可用）：**NVIDIA（CUDA）** 或 **Apple Silicon（MPS）**，否则使用 CPU。
+
+- **NVIDIA 显卡（Windows / Linux）**：需安装带 CUDA 的 PyTorch（先装好 [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) 或使用 PyTorch 自带 CUDA 的包）。安装依赖后执行：
+  ```bash
+  pip uninstall torch -y
+  pip install torch --index-url https://download.pytorch.org/whl/cu121
+  ```
+  （`cu121` 为 CUDA 12.1；其他版本见 [PyTorch 官网](https://pytorch.org/get-started/locally/)）
+- **Apple Silicon（M1/M2/M3 等）**：用 `pip install -r requirements.txt` 安装的 PyTorch 通常已支持 MPS，无需额外步骤。
+- 启动后若使用 GPU，转写会明显更快。
+
 ## 使用说明
 
 1. **ffmpeg**：若页面顶部提示未检测到 ffmpeg，可点击「一键下载并安装 ffmpeg」等待完成（约 1～2 分钟）
@@ -81,6 +94,32 @@ auto_subbed/
 └── static/
     └── index.html      # 前端页面
 ```
+
+## Windows 常见问题
+
+### `OSError: [WinError 1114] 动态链接库(DLL)初始化例程失败`（c10.dll 等）
+
+多为 PyTorch 在 Windows 上依赖的运行时缺失或冲突，可依次尝试：
+
+1. **安装 Visual C++ 运行库**  
+   安装 [Microsoft Visual C++ Redistributable（最新 x64）](https://aka.ms/vs/17/release/vc_redist.x64.exe)，安装后重启终端再运行 `python app.py`。
+
+2. **重装 PyTorch（CPU 版）**  
+   先卸再装，使用官方 CPU 构建，避免与 CUDA 等 DLL 冲突：
+   ```bash
+   pip uninstall torch -y
+   pip install torch --index-url https://download.pytorch.org/whl/cpu
+   ```
+   若需要 **GPU 加速**且已安装 NVIDIA 驱动与 CUDA，可在解决上述问题后改用：`pip install torch --index-url https://download.pytorch.org/whl/cu121`（见上方「GPU 加速」）。
+
+3. **用 Conda 安装 PyTorch（若上面仍报错）**  
+   在 Conda 环境中安装 PyTorch 有时更稳定：
+   ```bash
+   conda install pytorch cpuonly -c pytorch
+   ```
+
+4. **确认 Python 版本**  
+   建议使用 64 位 Python 3.10 或 3.11，在 [python.org](https://www.python.org/downloads/) 下载安装时勾选 “Add Python to PATH”。
 
 ## 技术说明
 

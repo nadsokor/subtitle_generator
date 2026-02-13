@@ -17,6 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List, Tuple
 
+import torch
 import whisper
 import deepl
 from deep_translator import GoogleTranslator
@@ -361,6 +362,15 @@ def _format_eta(seconds: int) -> str:
     return f"{h} 小时 {m} 分" if h else f"{m} 分钟"
 
 
+def _whisper_device() -> str:
+    """优先 CUDA，其次 Apple MPS，否则 CPU。"""
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def _get_whisper_cache_dir() -> str:
     default = os.path.join(os.path.expanduser("~"), ".cache")
     return os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
@@ -474,7 +484,8 @@ def _process_job(
         _ensure_model_downloaded(model_name, download_progress)
 
         _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
-        model = whisper.load_model(model_name, device="cpu")
+        _device = _whisper_device()
+        model = whisper.load_model(model_name, device=_device)
         transcribe_options = {"word_timestamps": False}
         if language and language != "auto":
             transcribe_options["language"] = language
