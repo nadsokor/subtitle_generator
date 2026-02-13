@@ -1,4 +1,4 @@
-# 视频自动字幕 - 依赖
+# Video auto subtitle - dependencies
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
