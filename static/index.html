@@ -269,6 +269,13 @@
       <h2>识别设置</h2>
       <div class="row">
         <div class="field">
+          <label for="engine">识别引擎</label>
+          <select id="engine">
+            <option value="whisper" selected>Whisper（原版）</option>
+            <option value="faster-whisper">faster-whisper（更快）</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="model">Whisper 模型</label>
           <select id="model">
             <option value="tiny">tiny（最快）</option>
@@ -401,12 +408,13 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.1.0";
+    const APP_VERSION = "1.2.0";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
     const fileInput = document.getElementById("fileInput");
     const fileName = document.getElementById("fileName");
+    const engine = document.getElementById("engine");
     const model = document.getElementById("model");
     const language = document.getElementById("language");
     const translationApi = document.getElementById("translationApi");
@@ -634,6 +642,7 @@
 
       const apiUrl = onlyTranslate ? "/api/translate" : "/api/transcribe";
       if (!onlyTranslate) {
+        form.append("engine", engine.value);
         form.append("model_name", model.value);
         form.append("language", language.value);
       }

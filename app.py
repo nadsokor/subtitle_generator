@@ -21,6 +21,7 @@ from typing import Callable, Dict, Any, Optional, List, Tuple
 import torch
 import whisper
 import deepl
+from faster_whisper import WhisperModel
 from deep_translator import GoogleTranslator
 from openai import OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
@@ -43,6 +44,11 @@ WHISPER_MODELS = [
     "large-v1", "large-v2", "large-v3", "large",
     "large-v3-turbo", "turbo",
 ]
+
+TRANSCRIBE_ENGINES = {
+    "whisper",
+    "faster-whisper",
+}
 
 # 常用语言：code -> 显示名（与 Whisper LANGUAGES 一致）
 LANGUAGES = [
@@ -403,6 +409,17 @@ def _whisper_device() -> str:
     return "cpu"
 
 
+def _faster_whisper_device() -> str:
+    env_device = (os.environ.get("AUTO_SUBBED_DEVICE") or "").strip().lower()
+    if env_device in ("cuda", "cpu"):
+        return env_device
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _faster_whisper_compute_type(device: str) -> str:
+    return "float16" if device == "cuda" else "float32"
+
+
 def _get_whisper_cache_dir() -> str:
     default = os.path.join(os.path.expanduser("~"), ".cache")
     return os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
@@ -496,6 +513,7 @@ def _process_job(
     input_path: str,
     model_name: str,
     language: str,
+    engine: str,
     translate_to: str,
     translation_api: str,
     openai_api_key: str,
@@ -514,14 +532,25 @@ def _process_job(
                 msg += f"（约剩余 {_format_eta(eta_sec)}）"
             _update_job(job_id, stage="downloading", progress=pct, message=msg, eta_seconds=eta_sec)
 
-        _ensure_model_downloaded(model_name, download_progress)
-
-        _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
-        _device = _whisper_device()
-        model = whisper.load_model(model_name, device=_device)
-        transcribe_options = {"word_timestamps": False}
-        if language and language != "auto":
-            transcribe_options["language"] = language
+        if engine == "whisper":
+            _ensure_model_downloaded(model_name, download_progress)
+            _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
+            _device = _whisper_device()
+            model = whisper.load_model(model_name, device=_device)
+            transcribe_options = {"word_timestamps": False}
+            if language and language != "auto":
+                transcribe_options["language"] = language
+        else:
+            _update_job(job_id, stage="downloading", progress=0, message="加载模型中…", eta_seconds=None)
+            fw_device = _faster_whisper_device()
+            fw_compute = _faster_whisper_compute_type(fw_device)
+            model = WhisperModel(model_name, device=fw_device, compute_type=fw_compute)
+            transcribe_options = {
+                "language": None if (not language or language == "auto") else language,
+                "task": "transcribe",
+                "word_timestamps": False,
+            }
+            _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
 
         work_dir = tempfile.mkdtemp(prefix="auto_subbed_")
         chunks = _split_audio(input_path, work_dir)
@@ -533,11 +562,20 @@ def _process_job(
         offset = 0.0
         transcribe_start = time.time()
         for idx, chunk in enumerate(chunks, 1):
-            result = model.transcribe(chunk, **transcribe_options)
-            for seg in result.get("segments") or []:
-                seg["start"] = (seg.get("start") or 0) + offset
-                seg["end"] = (seg.get("end") or 0) + offset
-                all_segments.append(seg)
+            if engine == "whisper":
+                result = model.transcribe(chunk, **transcribe_options)
+                for seg in result.get("segments") or []:
+                    seg["start"] = (seg.get("start") or 0) + offset
+                    seg["end"] = (seg.get("end") or 0) + offset
+                    all_segments.append(seg)
+            else:
+                segments, _info = model.transcribe(chunk, **transcribe_options)
+                for seg in segments:
+                    all_segments.append({
+                        "start": (seg.start or 0) + offset,
+                        "end": (seg.end or 0) + offset,
+                        "text": seg.text or "",
+                    })
 
             duration = _get_media_duration(chunk) or 0
             if duration <= 0:
@@ -824,6 +862,7 @@ async def transcribe_video(
     file: UploadFile = File(...),
     model_name: str = Form("base"),
     language: str = Form("auto"),
+    engine: str = Form("whisper"),
     translate_to: str = Form("none"),
     translation_api: str = Form("none"),
     openai_api_key: str = Form(""),
@@ -844,6 +883,8 @@ async def transcribe_video(
         )
     if model_name not in WHISPER_MODELS:
         raise HTTPException(status_code=400, detail=f"不支持的模型: {model_name}")
+    if engine not in TRANSCRIBE_ENGINES:
+        raise HTTPException(status_code=400, detail=f"不支持的识别引擎: {engine}")
 
     available, _, path_or_error = check_ffmpeg_available()
     if not available:
@@ -873,6 +914,7 @@ async def transcribe_video(
             input_path,
             model_name,
             language,
+            engine,
             translate_to,
             translation_api,
             openai_api_key,
