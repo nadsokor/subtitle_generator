@@ -50,6 +50,8 @@ TRANSCRIBE_ENGINES = {
     "faster-whisper",
 }
 
+FASTER_WHISPER_MODEL_PREFIX = "Systran/faster-whisper-"
+
 # 常用语言：code -> 显示名（与 Whisper LANGUAGES 一致）
 LANGUAGES = [
     ("auto", "自动检测"),
@@ -302,6 +304,11 @@ _apply_ffmpeg_path()
 # 简单任务存储（内存）
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
 JOB_LOCK = threading.Lock()
+JOB_CANCEL: Dict[str, threading.Event] = {}
+
+
+class JobCanceled(Exception):
+    pass
 
 
 def _init_job(job_id: str, filename: str, filename_original: Optional[str] = None) -> None:
@@ -318,6 +325,7 @@ def _init_job(job_id: str, filename: str, filename_original: Optional[str] = Non
             "error": None,
             "eta_seconds": None,
         }
+        JOB_CANCEL[job_id] = threading.Event()
 
 
 def _update_job(job_id: str, **kwargs: Any) -> None:
@@ -329,6 +337,11 @@ def _update_job(job_id: str, **kwargs: Any) -> None:
 def _get_job(job_id: str) -> Optional[Dict[str, Any]]:
     with JOB_LOCK:
         return JOB_STORE.get(job_id)
+
+
+def _get_cancel_event(job_id: str) -> Optional[threading.Event]:
+    with JOB_LOCK:
+        return JOB_CANCEL.get(job_id)
 
 
 def get_extension(filename: str) -> str:
@@ -418,6 +431,15 @@ def _faster_whisper_device() -> str:
 
 def _faster_whisper_compute_type(device: str) -> str:
     return "float16" if device == "cuda" else "float32"
+
+
+def _faster_whisper_model_path(model_name: str) -> str:
+    """将模型名映射为 faster-whisper 仓库名或本地路径。"""
+    if os.path.exists(model_name):
+        return model_name
+    if model_name in WHISPER_MODELS:
+        return f"{FASTER_WHISPER_MODEL_PREFIX}{model_name}"
+    return model_name
 
 
 def _get_whisper_cache_dir() -> str:
@@ -524,6 +546,7 @@ def _process_job(
 ) -> None:
     work_dir = None
     try:
+        cancel_event = _get_cancel_event(job_id)
         _update_job(job_id, status="running", stage="downloading", progress=0, message="下载模型中 0%", eta_seconds=None)
 
         def download_progress(pct: int, eta_sec: Optional[int]) -> None:
@@ -532,6 +555,8 @@ def _process_job(
                 msg += f"（约剩余 {_format_eta(eta_sec)}）"
             _update_job(job_id, stage="downloading", progress=pct, message=msg, eta_seconds=eta_sec)
 
+        if cancel_event and cancel_event.is_set():
+            raise JobCanceled("任务已取消")
         if engine == "whisper":
             _ensure_model_downloaded(model_name, download_progress)
             _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
@@ -544,7 +569,15 @@ def _process_job(
             _update_job(job_id, stage="downloading", progress=0, message="加载模型中…", eta_seconds=None)
             fw_device = _faster_whisper_device()
             fw_compute = _faster_whisper_compute_type(fw_device)
-            model = WhisperModel(model_name, device=fw_device, compute_type=fw_compute)
+            model_root = Path(__file__).resolve().parent / ".models" / "faster-whisper"
+            os.makedirs(model_root, exist_ok=True)
+            fw_name = _faster_whisper_model_path(model_name)
+            model = WhisperModel(
+                fw_name,
+                device=fw_device,
+                compute_type=fw_compute,
+                download_root=str(model_root),
+            )
             transcribe_options = {
                 "language": None if (not language or language == "auto") else language,
                 "task": "transcribe",
@@ -562,6 +595,8 @@ def _process_job(
         offset = 0.0
         transcribe_start = time.time()
         for idx, chunk in enumerate(chunks, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
             if engine == "whisper":
                 result = model.transcribe(chunk, **transcribe_options)
                 for seg in result.get("segments") or []:
@@ -592,6 +627,8 @@ def _process_job(
                 msg += f"（约剩余 {_format_eta(eta_sec)}）"
             _update_job(job_id, stage="transcribing", progress=progress, message=msg, eta_seconds=eta_sec)
 
+        if cancel_event and cancel_event.is_set():
+            raise JobCanceled("任务已取消")
         srt_original_content = segments_to_srt(all_segments)
         if translation_api and translation_api != "none" and translate_to and translate_to != "none":
             name = (base_name or Path(input_path).stem).strip() or "subtitle"
@@ -622,10 +659,13 @@ def _process_job(
                 openai_model=openai_model or None,
                 translation_rules=translation_rules or None,
                 progress_cb=translate_progress,
+                cancel_event=cancel_event,
             )
 
         srt_content = segments_to_srt(all_segments)
         _update_job(job_id, status="done", stage="done", progress=100, message="完成", srt=srt_content, eta_seconds=0)
+    except JobCanceled as e:
+        _update_job(job_id, status="canceled", stage="canceled", progress=0, error=str(e), message="已取消", eta_seconds=None)
     except Exception as e:
         _update_job(job_id, status="error", stage="error", progress=0, error=str(e), message=f"失败: {e}", eta_seconds=None)
     finally:
@@ -653,6 +693,7 @@ def _process_translate_only_job(
 ) -> None:
     """仅翻译：读取 SRT 文件，翻译后写回 SRT，不涉及转写。"""
     try:
+        cancel_event = _get_cancel_event(job_id)
         with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
             srt_text = f.read()
         segments = srt_to_segments(srt_text)
@@ -683,9 +724,12 @@ def _process_translate_only_job(
             openai_model=openai_model or None,
             translation_rules=translation_rules or None,
             progress_cb=translate_progress,
+            cancel_event=cancel_event,
         )
         srt_content = segments_to_srt(translated)
         _update_job(job_id, status="done", stage="done", progress=100, message="完成", srt=srt_content, eta_seconds=0)
+    except JobCanceled as e:
+        _update_job(job_id, status="canceled", stage="canceled", progress=0, error=str(e), message="已取消", eta_seconds=None)
     except Exception as e:
         _update_job(job_id, status="error", stage="error", progress=0, error=str(e), message=f"失败: {e}", eta_seconds=None)
     finally:
@@ -711,6 +755,7 @@ def translate_segments(
     openai_model: str | None = None,
     translation_rules: str | None = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> list:
     """
     将 segments 中每条 text 翻译成目标语言，时间轴不变。
@@ -722,6 +767,8 @@ def translate_segments(
     out = []
     total = len(segments)
     for idx, seg in enumerate(segments, 1):
+        if cancel_event and cancel_event.is_set():
+            raise JobCanceled("任务已取消")
         text = (seg.get("text") or "").strip()
         if not text:
             out.append(seg)
@@ -999,6 +1046,20 @@ async def get_job(job_id: str):
     if job.get("filename_original") and job.get("srt_original") is not None:
         out["filename_original"] = job.get("filename_original")
     return out
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if job.get("status") in ("done", "error", "canceled"):
+        return {"success": True, "status": job.get("status")}
+    ev = _get_cancel_event(job_id)
+    if ev:
+        ev.set()
+    _update_job(job_id, status="canceled", stage="canceled", progress=0, message="已取消", eta_seconds=None)
+    return {"success": True, "status": "canceled"}
 
 
 @app.get("/api/jobs/{job_id}/download")
