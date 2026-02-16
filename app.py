@@ -4,6 +4,7 @@
 """
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -297,7 +298,7 @@ JOB_STORE: Dict[str, Dict[str, Any]] = {}
 JOB_LOCK = threading.Lock()
 
 
-def _init_job(job_id: str, filename: str) -> None:
+def _init_job(job_id: str, filename: str, filename_original: Optional[str] = None) -> None:
     with JOB_LOCK:
         JOB_STORE[job_id] = {
             "status": "queued",
@@ -305,7 +306,9 @@ def _init_job(job_id: str, filename: str) -> None:
             "progress": 0,
             "message": "等待开始",
             "filename": filename,
+            "filename_original": filename_original,
             "srt": None,
+            "srt_original": None,
             "error": None,
             "eta_seconds": None,
         }
@@ -349,6 +352,28 @@ def segments_to_srt(segments: list) -> str:
         lines.append(text)
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def srt_to_segments(srt_text: str) -> list:
+    """解析 SRT 文本为 segments 列表，每项 { start, end, text }。"""
+    segments = []
+    # 按空行分块，兼容 \n 与 \r\n
+    blocks = re.split(r"\n\s*\n", (srt_text or "").strip())
+    for block in blocks:
+        lines = [ln.strip() for ln in block.strip().split("\n") if ln.strip()]
+        if len(lines) < 2:
+            continue
+        # 第一行：序号（可忽略）；第二行：00:00:00,000 --> 00:00:02,500
+        time_line = lines[1]
+        m = re.match(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})", time_line)
+        if not m:
+            continue
+        start = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + int(m.group(4)) / 1000.0
+        end = int(m.group(5)) * 3600 + int(m.group(6)) * 60 + int(m.group(7)) + int(m.group(8)) / 1000.0
+        text = "\n".join(lines[2:]).strip()
+        if text:
+            segments.append({"start": start, "end": end, "text": text})
+    return segments
 
 
 def _format_eta(seconds: int) -> str:
@@ -470,6 +495,7 @@ def _process_job(
     deepl_api_key: str,
     openai_model: str,
     translation_rules: str,
+    base_name: str = "",
 ) -> None:
     work_dir = None
     try:
@@ -521,7 +547,11 @@ def _process_job(
                 msg += f"（约剩余 {_format_eta(eta_sec)}）"
             _update_job(job_id, stage="transcribing", progress=progress, message=msg, eta_seconds=eta_sec)
 
+        srt_original_content = segments_to_srt(all_segments)
         if translation_api and translation_api != "none" and translate_to and translate_to != "none":
+            name = (base_name or Path(input_path).stem).strip() or "subtitle"
+            filename_original = f"{name}.srt"
+            _update_job(job_id, srt_original=srt_original_content, filename_original=filename_original)
             _update_job(job_id, stage="translating", progress=0, message="翻译中 0%", eta_seconds=None)
 
             translate_start = time.time()
@@ -563,6 +593,61 @@ def _process_job(
                 shutil.rmtree(work_dir)
             except Exception:
                 pass
+
+
+def _process_translate_only_job(
+    job_id: str,
+    srt_path: str,
+    translate_to: str,
+    translation_api: str,
+    openai_api_key: str,
+    deepl_api_key: str,
+    openai_model: str,
+    translation_rules: str,
+    base_name: str,
+) -> None:
+    """仅翻译：读取 SRT 文件，翻译后写回 SRT，不涉及转写。"""
+    try:
+        with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
+            srt_text = f.read()
+        segments = srt_to_segments(srt_text)
+        if not segments:
+            raise RuntimeError("SRT 文件无有效字幕块，请检查格式")
+
+        _update_job(job_id, status="running", stage="translating", progress=0, message="翻译中 0%", eta_seconds=None)
+        translate_start = time.time()
+
+        def translate_progress(done: int, total: int) -> None:
+            pct = int(done / total * 100) if total else 100
+            eta_sec = None
+            if done > 0 and total and done < total:
+                elapsed = time.time() - translate_start
+                eta_sec = int(elapsed / done * (total - done))
+            msg = f"翻译中 {pct}%"
+            if eta_sec is not None and eta_sec > 0:
+                msg += f"（约剩余 {_format_eta(eta_sec)}）"
+            _update_job(job_id, stage="translating", progress=pct, message=msg, eta_seconds=eta_sec)
+
+        translated = translate_segments(
+            segments,
+            target_lang=translate_to,
+            api_name=translation_api,
+            source_lang=None,
+            openai_api_key=openai_api_key or None,
+            deepl_api_key=deepl_api_key or None,
+            openai_model=openai_model or None,
+            translation_rules=translation_rules or None,
+            progress_cb=translate_progress,
+        )
+        srt_content = segments_to_srt(translated)
+        _update_job(job_id, status="done", stage="done", progress=100, message="完成", srt=srt_content, eta_seconds=0)
+    except Exception as e:
+        _update_job(job_id, status="error", stage="error", progress=0, error=str(e), message=f"失败: {e}", eta_seconds=None)
+    finally:
+        try:
+            os.unlink(srt_path)
+        except Exception:
+            pass
 
 
 def _translator_target_code(lang: str) -> str:
@@ -770,8 +855,9 @@ async def transcribe_video(
     base_name = Path(file.filename or "video").stem
     out_suffix = f".{translate_to}" if (translate_to and translate_to != "none") else ""
     filename = f"{base_name}{out_suffix}.srt"
+    filename_original = f"{base_name}.srt" if (translate_to and translate_to != "none") else None
     job_id = str(uuid.uuid4())
-    _init_job(job_id, filename)
+    _init_job(job_id, filename, filename_original=filename_original)
 
     thread = threading.Thread(
         target=_process_job,
@@ -786,6 +872,58 @@ async def transcribe_video(
             deepl_api_key,
             openai_model,
             translation_rules,
+            base_name,
+        ),
+        daemon=True,
+    )
+    thread.start()
+
+    return {"job_id": job_id}
+
+
+@app.post("/api/translate")
+async def translate_only(
+    file: UploadFile = File(...),
+    translate_to: str = Form(...),
+    translation_api: str = Form(...),
+    openai_api_key: str = Form(""),
+    deepl_api_key: str = Form(""),
+    openai_model: str = Form(""),
+    translation_rules: str = Form(""),
+):
+    """
+    仅翻译：上传 .srt 字幕文件，翻译成目标语言后返回新 SRT。不进行语音转写。
+    """
+    ext = get_extension(file.filename or "")
+    if ext != ".srt":
+        raise HTTPException(status_code=400, detail="仅支持 .srt 字幕文件")
+    if not translate_to or translate_to == "none":
+        raise HTTPException(status_code=400, detail="请选择翻译目标语言")
+    if not translation_api or translation_api == "none":
+        raise HTTPException(status_code=400, detail="请选择翻译 API")
+
+    with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".srt") as tmp:
+        content = await file.read()
+        tmp.write(content)
+        srt_path = tmp.name
+
+    base_name = Path(file.filename or "subtitle").stem
+    filename = f"{base_name}.{translate_to}.srt"
+    job_id = str(uuid.uuid4())
+    _init_job(job_id, filename)
+
+    thread = threading.Thread(
+        target=_process_translate_only_job,
+        args=(
+            job_id,
+            srt_path,
+            translate_to,
+            translation_api,
+            openai_api_key,
+            deepl_api_key,
+            openai_model,
+            translation_rules,
+            base_name,
         ),
         daemon=True,
     )
@@ -799,7 +937,7 @@ async def get_job(job_id: str):
     job = _get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在")
-    return {
+    out = {
         "job_id": job_id,
         "status": job.get("status"),
         "stage": job.get("stage"),
@@ -809,19 +947,31 @@ async def get_job(job_id: str):
         "error": job.get("error"),
         "eta_seconds": job.get("eta_seconds"),
     }
+    if job.get("filename_original") and job.get("srt_original") is not None:
+        out["filename_original"] = job.get("filename_original")
+    return out
 
 
 @app.get("/api/jobs/{job_id}/download")
-async def download_job(job_id: str):
+async def download_job(job_id: str, file: str = "translated"):
+    """
+    file=translated（默认）下载翻译后的 SRT；file=original 下载未翻译的原文 SRT（仅当任务包含翻译时可用）。
+    """
     job = _get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在")
     if job.get("status") != "done":
         raise HTTPException(status_code=400, detail="任务未完成")
-    srt_content = job.get("srt") or ""
-    filename = job.get("filename") or "subtitle.srt"
+    if file == "original":
+        srt_content = job.get("srt_original")
+        filename = job.get("filename_original")
+        if srt_content is None or not filename:
+            raise HTTPException(status_code=400, detail="该任务无未翻译版本")
+    else:
+        srt_content = job.get("srt") or ""
+        filename = job.get("filename") or "subtitle.srt"
     return Response(
-        content=srt_content.encode("utf-8"),
+        content=(srt_content or "").encode("utf-8"),
         media_type="application/x-subrip; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

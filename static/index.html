@@ -240,6 +240,15 @@
     <h1>视频自动字幕</h1>
     <p class="subtitle">上传视频或音频，选择 Whisper 模型与语言，本地生成 .srt 字幕文件</p>
 
+    <div class="card" style="margin-bottom: 1rem;">
+      <label for="workMode" style="margin-bottom: 0.35rem;">模式</label>
+      <select id="workMode">
+        <option value="transcribe">转写（可选翻译）</option>
+        <option value="translate_only">仅翻译字幕</option>
+      </select>
+      <p class="hint" id="workModeHint" style="margin-top: 0.5rem;">转写：上传视频或音频，选择 Whisper 模型与语言，本地生成 .srt；可选翻译成另一语言</p>
+    </div>
+
     <div class="ffmpeg-banner hidden" id="ffmpegBanner">
       <span id="ffmpegBannerText"></span>
       <div><button type="button" class="btn-install" id="ffmpegInstallBtn">一键下载并安装 ffmpeg</button></div>
@@ -250,13 +259,13 @@
       <div class="upload-zone" id="uploadZone">
         <input type="file" id="fileInput" accept=".mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.mp3,.wav,.m4a,.flac,.ogg,.aac,.wma" />
         <div class="icon">📁</div>
-        <div>点击或拖拽视频/音频到此处</div>
-        <div class="hint">支持 MP4、MKV、AVI、MOV、WebM、MP3、WAV 等</div>
+        <div id="uploadZoneLabel">点击或拖拽视频/音频到此处</div>
+        <div class="hint" id="uploadZoneHint">支持 MP4、MKV、AVI、MOV、WebM、MP3、WAV 等</div>
         <div class="file-name" id="fileName"></div>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="cardRecognize">
       <h2>识别设置</h2>
       <div class="row">
         <div class="field">
@@ -305,9 +314,9 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="cardTranslate">
       <h2>翻译（可选）</h2>
-      <p class="hint" style="margin-bottom: 0.75rem;">将识别出的字幕翻译成另一种语言后再导出</p>
+      <p class="hint" style="margin-bottom: 0.75rem;" id="translateHint">将识别出的字幕翻译成另一种语言后再导出</p>
       <div class="row">
         <div class="field">
           <label for="translationApi">翻译 API</label>
@@ -392,7 +401,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.0.0";
+    const APP_VERSION = "1.1.0";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -419,8 +428,46 @@
     const ffmpegBanner = document.getElementById("ffmpegBanner");
     const ffmpegBannerText = document.getElementById("ffmpegBannerText");
     const ffmpegInstallBtn = document.getElementById("ffmpegInstallBtn");
+    const workMode = document.getElementById("workMode");
+    const uploadZoneLabel = document.getElementById("uploadZoneLabel");
+    const uploadZoneHint = document.getElementById("uploadZoneHint");
+    const cardRecognize = document.getElementById("cardRecognize");
+    const translateHint = document.getElementById("translateHint");
+    const workModeHint = document.getElementById("workModeHint");
 
     const STORAGE_KEY = "auto_subbed_api_config";
+
+    function updateModeUI() {
+      const onlyTranslate = workMode.value === "translate_only";
+      cardRecognize.style.display = onlyTranslate ? "none" : "block";
+      if (onlyTranslate) {
+        ffmpegBanner.classList.add("hidden");
+      } else {
+        checkFfmpegAndShowBanner();
+      }
+      if (onlyTranslate) {
+        workModeHint.textContent = "仅翻译：上传已有 .srt，直接翻译成目标语言，不进行语音识别";
+        fileInput.accept = ".srt";
+        uploadZoneLabel.textContent = "点击或拖拽 .srt 字幕文件到此处";
+        uploadZoneHint.textContent = "仅支持 .srt 格式";
+        cardTranslate.querySelector("h2").textContent = "翻译";
+        translateHint.textContent = "选择翻译 API 与目标语言，导出翻译后的 .srt";
+        submitBtn.textContent = "翻译字幕";
+      } else {
+        workModeHint.textContent = "转写：上传视频或音频，选择 Whisper 模型与语言，本地生成 .srt；可选翻译成另一语言";
+        fileInput.accept = ".mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.mp3,.wav,.m4a,.flac,.ogg,.aac,.wma";
+        uploadZoneLabel.textContent = "点击或拖拽视频/音频到此处";
+        uploadZoneHint.textContent = "支持 MP4、MKV、AVI、MOV、WebM、MP3、WAV 等";
+        cardTranslate.querySelector("h2").textContent = "翻译（可选）";
+        translateHint.textContent = "将识别出的字幕翻译成另一种语言后再导出";
+        submitBtn.textContent = "生成字幕";
+      }
+      fileInput.files = null;
+      fileName.textContent = "";
+      submitBtn.disabled = true;
+    }
+    workMode.addEventListener("change", updateModeUI);
+    updateModeUI();
 
     async function checkFfmpegAndShowBanner() {
       try {
@@ -553,9 +600,20 @@
 
     submitBtn.addEventListener("click", async () => {
       const file = fileInput.files[0];
+      const onlyTranslate = workMode.value === "translate_only";
       if (!file) {
-        showStatus("请先选择视频或音频文件", "error");
+        showStatus(onlyTranslate ? "请先选择 .srt 字幕文件" : "请先选择视频或音频文件", "error");
         return;
+      }
+      if (onlyTranslate) {
+        if (!file.name.toLowerCase().endsWith(".srt")) {
+          showStatus("仅翻译模式请上传 .srt 文件", "error");
+          return;
+        }
+        if (translationApi.value === "none" || translateTo.value === "none") {
+          showStatus("请选择翻译 API 与目标语言", "error");
+          return;
+        }
       }
       saveApiConfig();
       submitBtn.disabled = true;
@@ -564,8 +622,6 @@
 
       const form = new FormData();
       form.append("file", file);
-      form.append("model_name", model.value);
-      form.append("language", language.value);
       form.append("translation_api", translationApi.value);
       form.append("translate_to", translateTo.value);
       if (openaiApiKey.value.trim()) form.append("openai_api_key", openaiApiKey.value.trim());
@@ -576,11 +632,14 @@
       form.append("openai_model", selectedModel);
       if (translationRules.value.trim()) form.append("translation_rules", translationRules.value.trim());
 
+      const apiUrl = onlyTranslate ? "/api/translate" : "/api/transcribe";
+      if (!onlyTranslate) {
+        form.append("model_name", model.value);
+        form.append("language", language.value);
+      }
+
       try {
-        const startRes = await fetch("/api/transcribe", {
-          method: "POST",
-          body: form,
-        });
+        const startRes = await fetch(apiUrl, { method: "POST", body: form });
         if (!startRes.ok) {
           const err = await startRes.json().catch(() => ({ detail: startRes.statusText }));
           throw new Error(err.detail || startRes.statusText);
@@ -599,25 +658,32 @@
             throw new Error(job.error || "任务失败");
           }
           if (job.status === "done") {
-            const dlRes = await fetch(`/api/jobs/${job_id}/download`);
-            if (!dlRes.ok) {
-              const err = await dlRes.json().catch(() => ({ detail: dlRes.statusText }));
-              throw new Error(err.detail || dlRes.statusText);
+            const downloadOne = async (fileParam, defaultName) => {
+              const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
+              const dlRes = await fetch(url);
+              if (!dlRes.ok) throw new Error(dlRes.statusText);
+              const blob = await dlRes.blob();
+              const disp = dlRes.headers.get("Content-Disposition");
+              let name = defaultName;
+              if (disp) {
+                const m = disp.match(/filename="?([^";]+)"?/);
+                if (m) name = m[1].trim();
+              }
+              const a = document.createElement("a");
+              a.href = URL.createObjectURL(blob);
+              a.download = name;
+              a.click();
+              URL.revokeObjectURL(a.href);
+            };
+            if (job.filename_original) {
+              await downloadOne("original", job.filename_original);
+              await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+              showStatus("任务完成，已下载：未翻译 + 翻译版", "success");
+            } else {
+              await downloadOne(null, file.name.replace(/\.[^.]+$/, "") + ".srt");
+              showStatus("任务完成，字幕已开始下载", "success");
             }
-            const blob = await dlRes.blob();
-            const disp = dlRes.headers.get("Content-Disposition");
-            let name = file.name.replace(/\.[^.]+$/, "") + ".srt";
-            if (disp) {
-              const m = disp.match(/filename="?([^";]+)"?/);
-              if (m) name = m[1].trim();
-            }
-            const a = document.createElement("a");
-            a.href = URL.createObjectURL(blob);
-            a.download = name;
-            a.click();
-            URL.revokeObjectURL(a.href);
             showProgress(100, null);
-            showStatus("任务完成，字幕已开始下载", "success");
             submitBtn.disabled = false;
             return true;
           }
@@ -630,9 +696,7 @@
         let done = false;
         while (!done) {
           done = await poll();
-          if (!done) {
-            await new Promise((r) => setTimeout(r, 1000));
-          }
+          if (!done) await new Promise((r) => setTimeout(r, 1000));
         }
       } catch (e) {
         progressBarWrap.style.display = "none";
