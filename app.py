@@ -388,7 +388,14 @@ def _format_eta(seconds: int) -> str:
 
 
 def _whisper_device() -> str:
-    """优先 CUDA，其次 Apple MPS，否则 CPU。"""
+    """
+    选择 Whisper 运行设备。优先读环境变量 AUTO_SUBBED_DEVICE（cuda / mps / cpu），
+    未设置时：CUDA → Apple MPS → CPU。Windows 上若已装 CUDA 版 PyTorch 仍走 CPU，
+    可设置 AUTO_SUBBED_DEVICE=cuda 强制使用 GPU。
+    """
+    env_device = (os.environ.get("AUTO_SUBBED_DEVICE") or "").strip().lower()
+    if env_device in ("cuda", "mps", "cpu"):
+        return env_device
     if torch.cuda.is_available():
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():

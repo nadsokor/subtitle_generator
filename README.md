@@ -60,6 +60,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
   pip install torch --index-url https://download.pytorch.org/whl/cu121
   ```
   （`cu121` 为 CUDA 12.1；其他版本见 [PyTorch 官网](https://pytorch.org/get-started/locally/)）
+- 若已装 CUDA 版 PyTorch 仍走 CPU，可强制指定设备：**Windows** 在启动前执行 `set AUTO_SUBBED_DEVICE=cuda`，**Linux/macOS** 执行 `export AUTO_SUBBED_DEVICE=cuda`，再运行 `python app.py`。
 - **Apple Silicon（M1/M2/M3 等）**：用 `pip install -r requirements.txt` 安装的 PyTorch 通常已支持 MPS，无需额外步骤。
 - 启动后若使用 GPU，转写会明显更快。
 
