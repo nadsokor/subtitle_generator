@@ -48,9 +48,12 @@ WHISPER_MODELS = [
 TRANSCRIBE_ENGINES = {
     "whisper",
     "faster-whisper",
+    "purfview-xxl",
 }
 
 FASTER_WHISPER_MODEL_PREFIX = "Systran/faster-whisper-"
+
+PURFVIEW_XXL_EXE_NAME = "faster-whisper-xxl.exe"
 
 # 常用语言：code -> 显示名（与 Whisper LANGUAGES 一致）
 LANGUAGES = [
@@ -442,6 +445,36 @@ def _faster_whisper_model_path(model_name: str) -> str:
     return model_name
 
 
+def _purfview_xxl_exe_path() -> str:
+    """返回 Purfview faster-whisper-xxl.exe 路径。"""
+    env = (os.environ.get("PURFVIEW_XXL_EXE") or "").strip()
+    if env and os.path.exists(env):
+        return env
+    return str(Path(__file__).resolve().parent / ".models" / "purfview-xxl" / PURFVIEW_XXL_EXE_NAME)
+
+
+def _run_purfview_xxl_transcribe(
+    input_path: str,
+    model_name: str,
+    language: str,
+    work_dir: str,
+) -> str:
+    """调用 Purfview faster-whisper-xxl.exe 转写，返回 SRT 文本。"""
+    exe_path = _purfview_xxl_exe_path()
+    if not os.path.exists(exe_path):
+        raise RuntimeError(f"未找到 {PURFVIEW_XXL_EXE_NAME}，请放到 {Path(exe_path).parent}")
+    if sys.platform != "win32":
+        raise RuntimeError("Purfview XXL 仅支持 Windows")
+    cmd = [exe_path, input_path, "-m", model_name, "-o", work_dir]
+    if language and language != "auto":
+        cmd += ["-l", language]
+    subprocess.run(cmd, check=True)
+    srt_files = sorted(Path(work_dir).glob("*.srt"), key=lambda p: p.stat().st_mtime)
+    if not srt_files:
+        raise RuntimeError("Purfview XXL 未生成 SRT 文件")
+    return srt_files[-1].read_text(encoding="utf-8", errors="replace")
+
+
 def _get_whisper_cache_dir() -> str:
     default = os.path.join(os.path.expanduser("~"), ".cache")
     return os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
@@ -565,7 +598,7 @@ def _process_job(
             transcribe_options = {"word_timestamps": False}
             if language and language != "auto":
                 transcribe_options["language"] = language
-        else:
+        elif engine == "faster-whisper":
             _update_job(job_id, stage="downloading", progress=0, message="加载模型中…", eta_seconds=None)
             fw_device = _faster_whisper_device()
             fw_compute = _faster_whisper_compute_type(fw_device)
@@ -584,52 +617,59 @@ def _process_job(
                 "word_timestamps": False,
             }
             _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
+        else:
+            _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
 
         work_dir = tempfile.mkdtemp(prefix="auto_subbed_")
-        chunks = _split_audio(input_path, work_dir)
-        if not chunks:
-            raise RuntimeError("无法切分音频，请检查输入文件或 ffmpeg")
+        if engine == "purfview-xxl":
+            srt_original_content = _run_purfview_xxl_transcribe(input_path, model_name, language, work_dir)
+            all_segments = srt_to_segments(srt_original_content)
+        else:
+            chunks = _split_audio(input_path, work_dir)
+            if not chunks:
+                raise RuntimeError("无法切分音频，请检查输入文件或 ffmpeg")
 
-        all_segments = []
-        total_chunks = len(chunks)
-        offset = 0.0
-        transcribe_start = time.time()
-        for idx, chunk in enumerate(chunks, 1):
-            if cancel_event and cancel_event.is_set():
-                raise JobCanceled("任务已取消")
-            if engine == "whisper":
-                result = model.transcribe(chunk, **transcribe_options)
-                for seg in result.get("segments") or []:
-                    seg["start"] = (seg.get("start") or 0) + offset
-                    seg["end"] = (seg.get("end") or 0) + offset
-                    all_segments.append(seg)
-            else:
-                segments, _info = model.transcribe(chunk, **transcribe_options)
-                for seg in segments:
-                    all_segments.append({
-                        "start": (seg.start or 0) + offset,
-                        "end": (seg.end or 0) + offset,
-                        "text": seg.text or "",
-                    })
+            all_segments = []
+            total_chunks = len(chunks)
+            offset = 0.0
+            transcribe_start = time.time()
+            for idx, chunk in enumerate(chunks, 1):
+                if cancel_event and cancel_event.is_set():
+                    raise JobCanceled("任务已取消")
+                if engine == "whisper":
+                    result = model.transcribe(chunk, **transcribe_options)
+                    for seg in result.get("segments") or []:
+                        seg["start"] = (seg.get("start") or 0) + offset
+                        seg["end"] = (seg.get("end") or 0) + offset
+                        all_segments.append(seg)
+                else:
+                    segments, _info = model.transcribe(chunk, **transcribe_options)
+                    for seg in segments:
+                        all_segments.append({
+                            "start": (seg.start or 0) + offset,
+                            "end": (seg.end or 0) + offset,
+                            "text": seg.text or "",
+                        })
 
-            duration = _get_media_duration(chunk) or 0
-            if duration <= 0:
-                duration = 30.0
-            offset += duration
+                duration = _get_media_duration(chunk) or 0
+                if duration <= 0:
+                    duration = 30.0
+                offset += duration
 
-            progress = int(idx / total_chunks * 100)
-            elapsed = time.time() - transcribe_start
-            eta_sec = None
-            if idx < total_chunks and elapsed > 0:
-                eta_sec = int(elapsed / idx * (total_chunks - idx))
-            msg = f"转写中 {progress}%"
-            if eta_sec is not None and eta_sec > 0:
-                msg += f"（约剩余 {_format_eta(eta_sec)}）"
-            _update_job(job_id, stage="transcribing", progress=progress, message=msg, eta_seconds=eta_sec)
+                progress = int(idx / total_chunks * 100)
+                elapsed = time.time() - transcribe_start
+                eta_sec = None
+                if idx < total_chunks and elapsed > 0:
+                    eta_sec = int(elapsed / idx * (total_chunks - idx))
+                msg = f"转写中 {progress}%"
+                if eta_sec is not None and eta_sec > 0:
+                    msg += f"（约剩余 {_format_eta(eta_sec)}）"
+                _update_job(job_id, stage="transcribing", progress=progress, message=msg, eta_seconds=eta_sec)
 
         if cancel_event and cancel_event.is_set():
             raise JobCanceled("任务已取消")
-        srt_original_content = segments_to_srt(all_segments)
+        if engine != "purfview-xxl":
+            srt_original_content = segments_to_srt(all_segments)
         if translation_api and translation_api != "none" and translate_to and translate_to != "none":
             name = (base_name or Path(input_path).stem).strip() or "subtitle"
             filename_original = f"{name}.srt"

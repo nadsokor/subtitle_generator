@@ -69,7 +69,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 1. **ffmpeg**：若页面顶部提示未检测到 ffmpeg，可点击「一键下载并安装 ffmpeg」等待完成（约 1～2 分钟）
 2. 在页面中**选择或拖拽**视频/音频文件
 3. 选择 **Whisper 模型**：体积越大精度越高、速度越慢（如 `base` 平衡速度与效果）
-   - **识别引擎**：可选 Whisper 原版或 faster-whisper（更快，质量接近原版）
+   - **识别引擎**：可选 Whisper 原版、faster-whisper（更快）或 Purfview XXL（exe）
 4. 选择 **字幕语言**：若已知语种可指定，否则选「自动检测」
 5. （可选）**翻译**：
    - 在「翻译 API」中选 Google / DeepL / OpenAI，在「翻译成」中选目标语言
@@ -126,6 +126,7 @@ auto_subbed/
 ## 技术说明
 
 - **后端**：FastAPI + OpenAI Whisper（`openai-whisper`）+ 翻译（`deep-translator`：Google / DeepL；OpenAI 使用 Chat Completions）
+- **Purfview XXL（可选）**：将 `faster-whisper-xxl.exe` 放到 `app.py` 同级的 `.models/purfview-xxl/`，选择引擎为 `Purfview XXL（exe）` 即可调用
 - **前端**：单页 HTML + 原生 JS，无构建步骤；配置与 API Key 使用 localStorage 持久化
 - **ffmpeg**：优先使用系统 PATH；若无则从 BtbN（Windows/Linux）或 evermeet（macOS）下载并解压到 `.ffmpeg/<平台>`，仅当前进程 PATH 生效
 - **任务流程**：提交后异步执行（下载模型 → 转写 → 可选翻译），前端轮询任务状态并展示进度与预计剩余时间
