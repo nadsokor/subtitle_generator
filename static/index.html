@@ -713,12 +713,18 @@
             throw new Error(err.detail || jobRes.statusText);
           }
           const job = await jobRes.json();
-          if (job.status === "error") {
-            throw new Error(job.error || "任务失败");
-          }
           if (!originalDownloaded && job.filename_original) {
             await downloadOne("original", job.filename_original);
             originalDownloaded = true;
+          }
+          if (job.status === "error") {
+            if (originalDownloaded) {
+              showStatus("翻译失败，但原字幕已下载", "error");
+              cancelBtn.disabled = true;
+              submitBtn.disabled = false;
+              return true;
+            }
+            throw new Error(job.error || "任务失败");
           }
           if (job.status === "canceled") {
             showStatus("任务已取消", "success");
