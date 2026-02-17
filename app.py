@@ -1070,14 +1070,14 @@ async def download_job(job_id: str, file: str = "translated"):
     job = _get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if job.get("status") != "done":
-        raise HTTPException(status_code=400, detail="任务未完成")
     if file == "original":
         srt_content = job.get("srt_original")
         filename = job.get("filename_original")
         if srt_content is None or not filename:
             raise HTTPException(status_code=400, detail="该任务无未翻译版本")
     else:
+        if job.get("status") != "done":
+            raise HTTPException(status_code=400, detail="任务未完成")
         srt_content = job.get("srt") or ""
         filename = job.get("filename") or "subtitle.srt"
     return Response(

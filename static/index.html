@@ -688,6 +688,24 @@
         if (!job_id) throw new Error("任务启动失败，未返回 job_id");
         currentJobId = job_id;
 
+        let originalDownloaded = false;
+        const downloadOne = async (fileParam, defaultName) => {
+          const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
+          const dlRes = await fetch(url);
+          if (!dlRes.ok) throw new Error(dlRes.statusText);
+          const blob = await dlRes.blob();
+          const disp = dlRes.headers.get("Content-Disposition");
+          let name = defaultName;
+          if (disp) {
+            const m = disp.match(/filename="?([^";]+)"?/);
+            if (m) name = m[1].trim();
+          }
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = name;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        };
         const poll = async () => {
           const jobRes = await fetch(`/api/jobs/${job_id}`);
           if (!jobRes.ok) {
@@ -698,6 +716,10 @@
           if (job.status === "error") {
             throw new Error(job.error || "任务失败");
           }
+          if (!originalDownloaded && job.filename_original) {
+            await downloadOne("original", job.filename_original);
+            originalDownloaded = true;
+          }
           if (job.status === "canceled") {
             showStatus("任务已取消", "success");
             showProgress(0, null);
@@ -706,25 +728,10 @@
             return true;
           }
           if (job.status === "done") {
-            const downloadOne = async (fileParam, defaultName) => {
-              const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
-              const dlRes = await fetch(url);
-              if (!dlRes.ok) throw new Error(dlRes.statusText);
-              const blob = await dlRes.blob();
-              const disp = dlRes.headers.get("Content-Disposition");
-              let name = defaultName;
-              if (disp) {
-                const m = disp.match(/filename="?([^";]+)"?/);
-                if (m) name = m[1].trim();
-              }
-              const a = document.createElement("a");
-              a.href = URL.createObjectURL(blob);
-              a.download = name;
-              a.click();
-              URL.revokeObjectURL(a.href);
-            };
             if (job.filename_original) {
-              await downloadOne("original", job.filename_original);
+              if (!originalDownloaded) {
+                await downloadOne("original", job.filename_original);
+              }
               await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
               showStatus("任务完成，已下载：未翻译 + 翻译版", "success");
             } else {
