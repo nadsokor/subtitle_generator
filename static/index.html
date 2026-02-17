@@ -153,6 +153,18 @@
       opacity: 0.6;
       cursor: not-allowed;
     }
+    .action-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .mode-hint {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 400;
+      line-height: 1.4;
+      margin-top: 0.45rem;
+    }
     .status {
       margin-top: 1rem;
       padding: 0.75rem 1rem;
@@ -246,7 +258,7 @@
         <option value="transcribe">转写（可选翻译）</option>
         <option value="translate_only">仅翻译字幕</option>
       </select>
-      <p class="hint" id="workModeHint" style="margin-top: 0.5rem;">转写：上传视频或音频，选择 Whisper 模型与语言，本地生成 .srt；可选翻译成另一语言</p>
+      <p class="mode-hint" id="workModeHint">转写：上传视频或音频，选择 Whisper 模型与语言，本地生成 .srt；可选翻译成另一语言</p>
     </div>
 
     <div class="ffmpeg-banner hidden" id="ffmpegBanner">
@@ -396,8 +408,10 @@
     </div>
 
     <div class="card">
-      <button type="button" class="btn btn-primary" id="submitBtn" disabled>生成字幕</button>
-      <button type="button" class="btn" id="cancelBtn" disabled style="margin-left:0.5rem;">终止任务</button>
+      <div class="action-buttons">
+        <button type="button" class="btn btn-primary" id="submitBtn" disabled>生成字幕</button>
+        <button type="button" class="btn" id="cancelBtn" disabled>终止任务</button>
+      </div>
       <div class="status" id="status"></div>
       <div class="progress-bar-wrap" id="progressBarWrap" style="display: none;">
         <div class="progress-bar-fill" id="progressBarFill"></div>
