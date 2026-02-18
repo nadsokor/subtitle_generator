@@ -502,15 +502,13 @@ def _run_purfview_xxl_transcribe(
                     message=f"Purfview: {line}",
                     eta_seconds=None,
                 )
-        code = proc.wait()
-        if code != 0:
-            raise RuntimeError(f"Purfview XXL 运行失败：{last_line or '未知错误'}")
+        proc.wait()
     finally:
         if proc.stdout:
             proc.stdout.close()
     srt_files = sorted(Path(work_dir).glob("*.srt"), key=lambda p: p.stat().st_mtime)
     if not srt_files:
-        raise RuntimeError("Purfview XXL 未生成 SRT 文件")
+        raise RuntimeError(f"Purfview XXL 未生成 SRT 文件：{last_line or '未知错误'}")
     return srt_files[-1].read_text(encoding="utf-8", errors="replace")
 
 
