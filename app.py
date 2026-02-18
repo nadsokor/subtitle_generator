@@ -468,7 +468,17 @@ def _run_purfview_xxl_transcribe(
     cmd = [exe_path, input_path, "-m", model_name, "-o", work_dir]
     if language and language != "auto":
         cmd += ["-l", language]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            cwd=str(Path(exe_path).parent),
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or e.stdout or "").strip()
+        raise RuntimeError(f"Purfview XXL 运行失败：{err or '未知错误'}") from e
     srt_files = sorted(Path(work_dir).glob("*.srt"), key=lambda p: p.stat().st_mtime)
     if not srt_files:
         raise RuntimeError("Purfview XXL 未生成 SRT 文件")
