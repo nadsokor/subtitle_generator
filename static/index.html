@@ -461,6 +461,7 @@
     const workModeHint = document.getElementById("workModeHint");
 
     const STORAGE_KEY = "auto_subbed_api_config";
+    const SETTINGS_KEY = "auto_subbed_settings";
     let currentJobId = null;
 
     function updateModeUI() {
@@ -494,9 +495,6 @@
       cancelBtn.disabled = true;
       currentJobId = null;
     }
-    workMode.addEventListener("change", updateModeUI);
-    updateModeUI();
-
     async function checkFfmpegAndShowBanner() {
       try {
         const res = await fetch("/api/ffmpeg/status");
@@ -555,6 +553,34 @@
       } catch (_) {}
     }
 
+    function loadSettings() {
+      try {
+        const raw = localStorage.getItem(SETTINGS_KEY);
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        if (data.work_mode) workMode.value = data.work_mode;
+        if (data.engine) engine.value = data.engine;
+        if (data.model) model.value = data.model;
+        if (data.language) language.value = data.language;
+        if (data.translation_api) translationApi.value = data.translation_api;
+        if (data.translate_to) translateTo.value = data.translate_to;
+      } catch (_) {}
+    }
+
+    function saveSettings() {
+      try {
+        const data = {
+          work_mode: workMode.value,
+          engine: engine.value,
+          model: model.value,
+          language: language.value,
+          translation_api: translationApi.value,
+          translate_to: translateTo.value,
+        };
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
+      } catch (_) {}
+    }
+
     function saveApiConfig() {
       try {
         const data = {
@@ -575,13 +601,26 @@
     }
 
     loadApiConfig();
+    loadSettings();
+    updateModeUI();
     showApiConfigFor(translationApi.value);
-    translationApi.addEventListener("change", () => showApiConfigFor(translationApi.value));
+    translationApi.addEventListener("change", () => {
+      showApiConfigFor(translationApi.value);
+      saveSettings();
+    });
     openaiModelCustomWrap.style.display = openaiModel.value === "custom" ? "block" : "none";
     openaiModel.addEventListener("change", () => {
       openaiModelCustomWrap.style.display = openaiModel.value === "custom" ? "block" : "none";
       saveApiConfig();
     });
+    workMode.addEventListener("change", () => {
+      updateModeUI();
+      saveSettings();
+    });
+    engine.addEventListener("change", saveSettings);
+    model.addEventListener("change", saveSettings);
+    language.addEventListener("change", saveSettings);
+    translateTo.addEventListener("change", saveSettings);
 
     openaiApiKey.addEventListener("change", saveApiConfig);
     openaiApiKey.addEventListener("blur", saveApiConfig);
