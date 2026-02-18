@@ -848,8 +848,83 @@ def translate_segments(
     """
     if not segments or api_name == "none":
         return segments
-    out = []
     total = len(segments)
+
+    # DeepL: 使用单客户端 + 批量请求，避免逐条调用过慢
+    if api_name == "deepl":
+        key = (deepl_api_key or "").strip() or os.environ.get("DEEPL_AUTH_KEY") or os.environ.get("DEEPL_API_KEY")
+        if not key:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（deepl）: 请填写 DeepL API Key，或在服务端设置 DEEPL_API_KEY",
+            )
+        deepl_target = "ZH" if target_lang in ("zh", "zh-CN") else target_lang.upper()
+        client = deepl.DeepLClient(key)
+        kwargs = {"target_lang": deepl_target}
+        if source_lang:
+            kwargs["source_lang"] = source_lang.upper()
+
+        out: List[Optional[dict]] = [None] * total
+        pending: List[Tuple[int, dict, str]] = []
+        done = 0
+        for idx, seg in enumerate(segments, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                out[idx - 1] = seg
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+                continue
+            pending.append((idx, seg, text))
+
+        # 每批最多 50 条，且总字符数受控，提升吞吐并降低超时风险
+        batch_max_items = 50
+        batch_max_chars = 12000
+        pos = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta: List[Tuple[int, dict, str]] = []
+            batch_texts: List[str] = []
+            chars = 0
+            while pos < len(pending) and len(batch_meta) < batch_max_items:
+                m = pending[pos]
+                t = m[2]
+                if batch_meta and chars + len(t) > batch_max_chars:
+                    break
+                batch_meta.append(m)
+                batch_texts.append(t)
+                chars += len(t)
+                pos += 1
+            try:
+                result = client.translate_text(batch_texts, **kwargs)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"翻译失败（deepl）: {e!s}",
+                ) from e
+
+            if isinstance(result, list):
+                translated_items = result
+            else:
+                translated_items = [result]
+            if len(translated_items) != len(batch_meta):
+                raise HTTPException(
+                    status_code=500,
+                    detail="翻译失败（deepl）: 返回结果数量与请求不一致",
+                )
+            for (idx, seg, _), item in zip(batch_meta, translated_items):
+                translated = item.text if hasattr(item, "text") else str(item)
+                out[idx - 1] = {**seg, "text": translated}
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+
+        return [x if x is not None else segments[i] for i, x in enumerate(out)]
+
+    out = []
     for idx, seg in enumerate(segments, 1):
         if cancel_event and cancel_event.is_set():
             raise JobCanceled("任务已取消")
@@ -867,18 +942,6 @@ def translate_segments(
                     target=target,
                 )
                 translated = translator.translate(text)
-            elif api_name == "deepl":
-                key = (deepl_api_key or "").strip() or os.environ.get("DEEPL_AUTH_KEY") or os.environ.get("DEEPL_API_KEY")
-                if not key:
-                    raise ValueError("请填写 DeepL API Key，或在服务端设置 DEEPL_API_KEY")
-                # 使用官方 deepl 库（POST + Authorization 头），兼容 2025-03 后 DeepL 弃用 GET/auth_key 的变更
-                deepl_target = "ZH" if target_lang in ("zh", "zh-CN") else target_lang.upper()
-                client = deepl.DeepLClient(key)
-                kwargs = {"target_lang": deepl_target}
-                if source_lang:
-                    kwargs["source_lang"] = source_lang.upper()
-                result = client.translate_text(text, **kwargs)
-                translated = result.text if hasattr(result, "text") else str(result)
             elif api_name == "openai":
                 key = (openai_api_key or "").strip() or os.environ.get("OPENAI_API_KEY")
                 if not key:
