@@ -458,6 +458,9 @@ def _run_purfview_xxl_transcribe(
     model_name: str,
     language: str,
     work_dir: str,
+    *,
+    job_id: str,
+    cancel_event: Optional[threading.Event] = None,
 ) -> str:
     """调用 Purfview faster-whisper-xxl.exe 转写，返回 SRT 文本。"""
     exe_path = _purfview_xxl_exe_path()
@@ -468,17 +471,41 @@ def _run_purfview_xxl_transcribe(
     cmd = [exe_path, input_path, "-m", model_name, "-o", work_dir]
     if language and language != "auto":
         cmd += ["-l", language]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(Path(exe_path).parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+    )
+    last_line = ""
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            cwd=str(Path(exe_path).parent),
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or e.stdout or "").strip()
-        raise RuntimeError(f"Purfview XXL 运行失败：{err or '未知错误'}") from e
+        if proc.stdout:
+            for raw_line in proc.stdout:
+                if cancel_event and cancel_event.is_set():
+                    proc.terminate()
+                    raise JobCanceled("任务已取消")
+                line = (raw_line or "").strip()
+                if line:
+                    line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
+                if not line:
+                    continue
+                last_line = line
+                _update_job(
+                    job_id,
+                    stage="transcribing",
+                    progress=None,
+                    message=f"Purfview: {line}",
+                    eta_seconds=None,
+                )
+        code = proc.wait()
+        if code != 0:
+            raise RuntimeError(f"Purfview XXL 运行失败：{last_line or '未知错误'}")
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
     srt_files = sorted(Path(work_dir).glob("*.srt"), key=lambda p: p.stat().st_mtime)
     if not srt_files:
         raise RuntimeError("Purfview XXL 未生成 SRT 文件")
@@ -628,11 +655,18 @@ def _process_job(
             }
             _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
         else:
-            _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
+            _update_job(job_id, stage="transcribing", progress=None, message="转写中（Purfview XXL 不支持进度）", eta_seconds=None)
 
         work_dir = tempfile.mkdtemp(prefix="auto_subbed_")
         if engine == "purfview-xxl":
-            srt_original_content = _run_purfview_xxl_transcribe(input_path, model_name, language, work_dir)
+            srt_original_content = _run_purfview_xxl_transcribe(
+                input_path,
+                model_name,
+                language,
+                work_dir,
+                job_id=job_id,
+                cancel_event=cancel_event,
+            )
             all_segments = srt_to_segments(srt_original_content)
         else:
             chunks = _split_audio(input_path, work_dir)

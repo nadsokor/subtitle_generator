@@ -602,6 +602,11 @@
       progressEta.textContent = "";
     }
     function showProgress(percent, etaSeconds) {
+      if (percent == null) {
+        progressBarWrap.style.display = "none";
+        progressEta.textContent = "";
+        return;
+      }
       progressBarWrap.style.display = "block";
       progressBarFill.style.width = Math.min(100, Math.max(0, percent)) + "%";
       if (etaSeconds != null && etaSeconds > 0) {
@@ -752,7 +757,8 @@
           }
           const msg = job.message || "处理中…";
           showStatus(`<span class="spinner"></span>${msg}`, "loading");
-          showProgress(job.progress ?? 0, job.eta_seconds ?? null);
+          const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
+          showProgress(progressVal, job.eta_seconds ?? null);
           return false;
         };
 
