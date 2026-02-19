@@ -414,6 +414,7 @@
         <button type="button" class="btn" id="cancelBtn" disabled>终止任务</button>
       </div>
       <div class="status" id="status"></div>
+      <div class="hint" id="downloadList" style="margin-top: 0.6rem;"></div>
       <div class="progress-bar-wrap" id="progressBarWrap" style="display: none;">
         <div class="progress-bar-fill" id="progressBarFill"></div>
       </div>
@@ -447,6 +448,7 @@
     const submitBtn = document.getElementById("submitBtn");
     const cancelBtn = document.getElementById("cancelBtn");
     const statusEl = document.getElementById("status");
+    const downloadList = document.getElementById("downloadList");
     const progressBarWrap = document.getElementById("progressBarWrap");
     const progressBarFill = document.getElementById("progressBarFill");
     const progressEta = document.getElementById("progressEta");
@@ -647,6 +649,18 @@
       statusEl.className = "status";
       progressBarWrap.style.display = "none";
       progressEta.textContent = "";
+      downloadList.innerHTML = "";
+    }
+
+    function addDownloadLink(label, url, filename) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || "";
+      a.textContent = label;
+      a.style.display = "block";
+      a.style.marginTop = "0.25rem";
+      a.style.color = "var(--accent)";
+      downloadList.appendChild(a);
     }
     function showProgress(percent, etaSeconds) {
       if (percent == null) {
@@ -694,7 +708,7 @@
       hideStatus();
     }
 
-    async function runSingleFileTask(file, onlyTranslate, queueIndex, queueTotal) {
+    async function runSingleFileTask(file, onlyTranslate, queueIndex, queueTotal, batchMode) {
       const form = new FormData();
       form.append("file", file);
       form.append("translation_api", translationApi.value);
@@ -753,7 +767,20 @@
         }
         const job = await jobRes.json();
         if (!originalDownloaded && job.filename_original) {
-          await downloadOne("original", job.filename_original);
+          if (batchMode) {
+            addDownloadLink(
+              `[${queueIndex}] 原字幕：${job.filename_original}`,
+              `/api/jobs/${job_id}/download?file=original`,
+              job.filename_original
+            );
+            try {
+              await downloadOne("original", job.filename_original);
+            } catch (_) {
+              // 自动下载可能被浏览器拦截，保留可点击链接
+            }
+          } else {
+            await downloadOne("original", job.filename_original);
+          }
           originalDownloaded = true;
         }
         if (job.status === "error") {
@@ -767,7 +794,19 @@
           throw new Error("任务已取消");
         }
         if (job.status === "done") {
-          if (job.filename_original) {
+          if (batchMode) {
+            const finalName = job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt";
+            addDownloadLink(
+              `[${queueIndex}] 翻译/字幕：${finalName}`,
+              `/api/jobs/${job_id}/download`,
+              finalName
+            );
+            try {
+              await downloadOne("translated", finalName);
+            } catch (_) {
+              // 自动下载可能被浏览器拦截，保留可点击链接
+            }
+          } else if (job.filename_original) {
             if (!originalDownloaded) {
               await downloadOne("original", job.filename_original);
             }
@@ -790,6 +829,7 @@
     submitBtn.addEventListener("click", async () => {
       const files = selectedFiles.length ? selectedFiles : Array.from(fileInput.files || []);
       const onlyTranslate = workMode.value === "translate_only";
+      const batchMode = files.length > 1;
       if (!files.length) {
         showStatus(onlyTranslate ? "请先选择 .srt 字幕文件" : "请先选择视频或音频文件", "error");
         return;
@@ -809,6 +849,7 @@
       submitBtn.disabled = true;
       cancelBtn.disabled = false;
       stopQueue = false;
+      downloadList.innerHTML = "";
 
       let okCount = 0;
       let failCount = 0;
@@ -820,7 +861,7 @@
           showStatus(`<span class="spinner"></span>队列执行中（${i + 1}/${files.length}）`, "loading");
           showProgress(0, null);
           try {
-            const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length);
+            const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length, batchMode);
             if (result.ok) okCount += 1;
             else failCount += 1;
           } catch (e) {
