@@ -652,14 +652,32 @@
       downloadList.innerHTML = "";
     }
 
+    async function triggerDownload(url, preferredName) {
+      const dlRes = await fetch(url);
+      if (!dlRes.ok) throw new Error(dlRes.statusText);
+      const blob = await dlRes.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = preferredName || "subtitle.srt";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
     function addDownloadLink(label, url, filename) {
       const a = document.createElement("a");
-      a.href = url;
-      a.download = filename || "";
+      a.href = "#";
       a.textContent = label;
       a.style.display = "block";
       a.style.marginTop = "0.25rem";
       a.style.color = "var(--accent)";
+      a.addEventListener("click", async (e) => {
+        e.preventDefault();
+        try {
+          await triggerDownload(url, filename);
+        } catch (err) {
+          showStatus("下载失败：" + (err.message || String(err)), "error");
+        }
+      });
       downloadList.appendChild(a);
     }
     function showProgress(percent, etaSeconds) {
@@ -740,27 +758,7 @@
       let originalDownloaded = false;
       const downloadOne = async (fileParam, defaultName) => {
         const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
-        const dlRes = await fetch(url);
-        if (!dlRes.ok) throw new Error(dlRes.statusText);
-        const blob = await dlRes.blob();
-        const disp = dlRes.headers.get("Content-Disposition");
-        let name = defaultName;
-        if (disp) {
-          const mUtf8 = disp.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
-          if (mUtf8) {
-            try {
-              name = decodeURIComponent(mUtf8[1].trim());
-            } catch (_) {}
-          } else {
-            const m = disp.match(/filename="?([^";]+)"?/);
-            if (m) name = m[1].trim();
-          }
-        }
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = name;
-        a.click();
-        URL.revokeObjectURL(a.href);
+        await triggerDownload(url, defaultName);
       };
 
       while (true) {
