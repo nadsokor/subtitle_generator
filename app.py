@@ -17,6 +17,7 @@ import zipfile
 import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List, Tuple
+from urllib.parse import quote
 
 import torch
 import whisper
@@ -358,6 +359,15 @@ def format_timestamp_srt(seconds: float) -> str:
     secs = int(seconds % 60)
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _content_disposition(filename: str) -> str:
+    """构造兼容中文文件名的 Content-Disposition。"""
+    fallback = "".join(ch if 32 <= ord(ch) < 127 and ch not in {'"', "\\"} else "_" for ch in (filename or "subtitle.srt"))
+    if not fallback:
+        fallback = "subtitle.srt"
+    encoded = quote(filename or "subtitle.srt", safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
 def segments_to_srt(segments: list) -> str:
@@ -1230,7 +1240,7 @@ async def download_job(job_id: str, file: str = "translated"):
     return Response(
         content=(srt_content or "").encode("utf-8"),
         media_type="application/x-subrip; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _content_disposition(filename)},
     )
 
 
