@@ -746,8 +746,15 @@
         const disp = dlRes.headers.get("Content-Disposition");
         let name = defaultName;
         if (disp) {
-          const m = disp.match(/filename="?([^";]+)"?/);
-          if (m) name = m[1].trim();
+          const mUtf8 = disp.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+          if (mUtf8) {
+            try {
+              name = decodeURIComponent(mUtf8[1].trim());
+            } catch (_) {}
+          } else {
+            const m = disp.match(/filename="?([^";]+)"?/);
+            if (m) name = m[1].trim();
+          }
         }
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
