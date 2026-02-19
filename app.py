@@ -619,6 +619,7 @@ def _process_job(
     translate_to: str,
     translation_api: str,
     openai_api_key: str,
+    openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
     translation_rules: str,
@@ -749,6 +750,7 @@ def _process_job(
                 api_name=translation_api,
                 source_lang=None,
                 openai_api_key=openai_api_key or None,
+                openai_base_url=openai_base_url or None,
                 deepl_api_key=deepl_api_key or None,
                 openai_model=openai_model or None,
                 translation_rules=translation_rules or None,
@@ -780,6 +782,7 @@ def _process_translate_only_job(
     translate_to: str,
     translation_api: str,
     openai_api_key: str,
+    openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
     translation_rules: str,
@@ -814,6 +817,7 @@ def _process_translate_only_job(
             api_name=translation_api,
             source_lang=None,
             openai_api_key=openai_api_key or None,
+            openai_base_url=openai_base_url or None,
             deepl_api_key=deepl_api_key or None,
             openai_model=openai_model or None,
             translation_rules=translation_rules or None,
@@ -845,6 +849,7 @@ def translate_segments(
     source_lang: str | None = None,
     *,
     openai_api_key: str | None = None,
+    openai_base_url: str | None = None,
     deepl_api_key: str | None = None,
     openai_model: str | None = None,
     translation_rules: str | None = None,
@@ -964,7 +969,8 @@ def translate_segments(
                 system_content = f"You are a translator. Output only the translation in {lang_name}, no explanation."
                 if rules:
                     system_content = f"You are a translator. Style and rules you must follow:\n{rules}\n\nOutput only the translation in {lang_name}, no explanation."
-                client = OpenAI(api_key=key)
+                base_url = (openai_base_url or "").strip() or os.environ.get("OPENAI_BASE_URL")
+                client = OpenAI(api_key=key, base_url=base_url or None)
                 translated = None
                 for attempt in range(4):
                     try:
@@ -1070,6 +1076,7 @@ async def transcribe_video(
     translate_to: str = Form("none"),
     translation_api: str = Form("none"),
     openai_api_key: str = Form(""),
+    openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
     translation_rules: str = Form(""),
@@ -1122,6 +1129,7 @@ async def transcribe_video(
             translate_to,
             translation_api,
             openai_api_key,
+            openai_base_url,
             deepl_api_key,
             openai_model,
             translation_rules,
@@ -1140,6 +1148,7 @@ async def translate_only(
     translate_to: str = Form(...),
     translation_api: str = Form(...),
     openai_api_key: str = Form(""),
+    openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
     translation_rules: str = Form(""),
@@ -1173,6 +1182,7 @@ async def translate_only(
             translate_to,
             translation_api,
             openai_api_key,
+            openai_base_url,
             deepl_api_key,
             openai_model,
             translation_rules,

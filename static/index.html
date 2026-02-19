@@ -378,6 +378,10 @@
           <input type="password" id="openaiApiKey" placeholder="sk-..." autocomplete="off" />
         </div>
         <div class="field">
+          <label for="openaiBaseUrl">OpenAI Base URL（可选）</label>
+          <input type="text" id="openaiBaseUrl" placeholder="例如：https://api.openai.com/v1 或你的中转地址" autocomplete="off" />
+        </div>
+        <div class="field">
           <label for="openaiModel">OpenAI 翻译模型</label>
           <select id="openaiModel">
             <option value="custom">自定义…</option>
@@ -437,6 +441,7 @@
     const translationApi = document.getElementById("translationApi");
     const translateTo = document.getElementById("translateTo");
     const openaiApiKey = document.getElementById("openaiApiKey");
+    const openaiBaseUrl = document.getElementById("openaiBaseUrl");
     const openaiModel = document.getElementById("openaiModel");
     const openaiModelCustom = document.getElementById("openaiModelCustom");
     const openaiModelCustomWrap = document.getElementById("openaiModelCustomWrap");
@@ -556,6 +561,7 @@
         if (!raw) return;
         const data = JSON.parse(raw);
         if (data.openai_api_key) openaiApiKey.value = data.openai_api_key;
+        if (data.openai_base_url) openaiBaseUrl.value = data.openai_base_url;
         if (data.openai_model) openaiModel.value = data.openai_model;
         if (data.openai_model_custom) openaiModelCustom.value = data.openai_model_custom;
         if (data.deepl_api_key) deeplApiKey.value = data.deepl_api_key;
@@ -595,6 +601,7 @@
       try {
         const data = {
           openai_api_key: openaiApiKey.value.trim(),
+          openai_base_url: openaiBaseUrl.value.trim(),
           openai_model: openaiModel.value,
           openai_model_custom: openaiModelCustom.value.trim(),
           deepl_api_key: deeplApiKey.value.trim(),
@@ -634,6 +641,8 @@
 
     openaiApiKey.addEventListener("change", saveApiConfig);
     openaiApiKey.addEventListener("blur", saveApiConfig);
+    openaiBaseUrl.addEventListener("change", saveApiConfig);
+    openaiBaseUrl.addEventListener("blur", saveApiConfig);
     openaiModelCustom.addEventListener("change", saveApiConfig);
     openaiModelCustom.addEventListener("blur", saveApiConfig);
     deeplApiKey.addEventListener("change", saveApiConfig);
@@ -732,6 +741,7 @@
       form.append("translation_api", translationApi.value);
       form.append("translate_to", translateTo.value);
       if (openaiApiKey.value.trim()) form.append("openai_api_key", openaiApiKey.value.trim());
+      if (openaiBaseUrl.value.trim()) form.append("openai_base_url", openaiBaseUrl.value.trim());
       if (deeplApiKey.value.trim()) form.append("deepl_api_key", deeplApiKey.value.trim());
       const selectedModel = openaiModel.value === "custom"
         ? (openaiModelCustom.value.trim() || "gpt-4o-mini")
