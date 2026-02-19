@@ -269,7 +269,7 @@
     <div class="card">
       <h2>选择文件</h2>
       <div class="upload-zone" id="uploadZone">
-        <input type="file" id="fileInput" accept=".mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.mp3,.wav,.m4a,.flac,.ogg,.aac,.wma" />
+        <input type="file" id="fileInput" multiple accept=".mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.mp3,.wav,.m4a,.flac,.ogg,.aac,.wma" />
         <div class="icon">📁</div>
         <div id="uploadZoneLabel">点击或拖拽视频/音频到此处</div>
         <div class="hint" id="uploadZoneHint">支持 MP4、MKV、AVI、MOV、WebM、MP3、WAV 等</div>
@@ -463,6 +463,8 @@
     const STORAGE_KEY = "auto_subbed_api_config";
     const SETTINGS_KEY = "auto_subbed_settings";
     let currentJobId = null;
+    let selectedFiles = [];
+    let stopQueue = false;
 
     function updateModeUI() {
       const onlyTranslate = workMode.value === "translate_only";
@@ -491,6 +493,7 @@
       }
       fileInput.files = null;
       fileName.textContent = "";
+      selectedFiles = [];
       submitBtn.disabled = true;
       cancelBtn.disabled = true;
       currentJobId = null;
@@ -530,11 +533,16 @@
     });
 
     cancelBtn.addEventListener("click", async () => {
-      if (!currentJobId) return;
+      stopQueue = true;
+      if (!currentJobId) {
+        showStatus("已停止队列", "success");
+        cancelBtn.disabled = true;
+        return;
+      }
       cancelBtn.disabled = true;
       try {
         await fetch(`/api/jobs/${currentJobId}/cancel`, { method: "POST" });
-        showStatus("已请求终止任务", "success");
+        showStatus("已请求终止当前任务，并停止后续队列", "success");
       } catch (_) {
         showStatus("终止任务请求失败", "error");
       }
@@ -663,47 +671,30 @@
     uploadZone.addEventListener("drop", (e) => {
       e.preventDefault();
       uploadZone.classList.remove("dragover");
-      const f = e.dataTransfer.files[0];
-      if (f) setFile(f);
+      const files = Array.from(e.dataTransfer.files || []);
+      if (files.length) setFiles(files);
     });
     fileInput.addEventListener("change", () => {
-      const f = fileInput.files[0];
-      if (f) setFile(f);
+      const files = Array.from(fileInput.files || []);
+      if (files.length) setFiles(files);
     });
 
-    function setFile(file) {
+    function setFiles(files) {
+      selectedFiles = files.slice();
       fileInput.files = null;
       const dt = new DataTransfer();
-      dt.items.add(file);
+      selectedFiles.forEach((f) => dt.items.add(f));
       fileInput.files = dt.files;
-      fileName.textContent = file.name;
+      if (selectedFiles.length === 1) {
+        fileName.textContent = selectedFiles[0].name;
+      } else {
+        fileName.textContent = `已选择 ${selectedFiles.length} 个文件（${selectedFiles[0].name} 等）`;
+      }
       submitBtn.disabled = false;
       hideStatus();
     }
 
-    submitBtn.addEventListener("click", async () => {
-      const file = fileInput.files[0];
-      const onlyTranslate = workMode.value === "translate_only";
-      if (!file) {
-        showStatus(onlyTranslate ? "请先选择 .srt 字幕文件" : "请先选择视频或音频文件", "error");
-        return;
-      }
-      if (onlyTranslate) {
-        if (!file.name.toLowerCase().endsWith(".srt")) {
-          showStatus("仅翻译模式请上传 .srt 文件", "error");
-          return;
-        }
-        if (translationApi.value === "none" || translateTo.value === "none") {
-          showStatus("请选择翻译 API 与目标语言", "error");
-          return;
-        }
-      }
-      saveApiConfig();
-      submitBtn.disabled = true;
-      cancelBtn.disabled = false;
-      showStatus('<span class="spinner"></span>任务已提交，正在获取进度…', "loading");
-      showProgress(0, null);
-
+    async function runSingleFileTask(file, onlyTranslate, queueIndex, queueTotal) {
       const form = new FormData();
       form.append("file", file);
       form.append("translation_api", translationApi.value);
@@ -723,96 +714,136 @@
         form.append("language", language.value);
       }
 
-      try {
-        const startRes = await fetch(apiUrl, { method: "POST", body: form });
-        if (!startRes.ok) {
-          const err = await startRes.json().catch(() => ({ detail: startRes.statusText }));
-          throw new Error(err.detail || startRes.statusText);
+      const startRes = await fetch(apiUrl, { method: "POST", body: form });
+      if (!startRes.ok) {
+        const err = await startRes.json().catch(() => ({ detail: startRes.statusText }));
+        throw new Error(err.detail || startRes.statusText);
+      }
+      const { job_id } = await startRes.json();
+      if (!job_id) throw new Error("任务启动失败，未返回 job_id");
+      currentJobId = job_id;
+
+      let originalDownloaded = false;
+      const downloadOne = async (fileParam, defaultName) => {
+        const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
+        const dlRes = await fetch(url);
+        if (!dlRes.ok) throw new Error(dlRes.statusText);
+        const blob = await dlRes.blob();
+        const disp = dlRes.headers.get("Content-Disposition");
+        let name = defaultName;
+        if (disp) {
+          const m = disp.match(/filename="?([^";]+)"?/);
+          if (m) name = m[1].trim();
         }
-        const { job_id } = await startRes.json();
-        if (!job_id) throw new Error("任务启动失败，未返回 job_id");
-        currentJobId = job_id;
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
 
-        let originalDownloaded = false;
-        const downloadOne = async (fileParam, defaultName) => {
-          const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
-          const dlRes = await fetch(url);
-          if (!dlRes.ok) throw new Error(dlRes.statusText);
-          const blob = await dlRes.blob();
-          const disp = dlRes.headers.get("Content-Disposition");
-          let name = defaultName;
-          if (disp) {
-            const m = disp.match(/filename="?([^";]+)"?/);
-            if (m) name = m[1].trim();
+      while (true) {
+        if (stopQueue) {
+          throw new Error("队列已停止");
+        }
+        const jobRes = await fetch(`/api/jobs/${job_id}`);
+        if (!jobRes.ok) {
+          const err = await jobRes.json().catch(() => ({ detail: jobRes.statusText }));
+          throw new Error(err.detail || jobRes.statusText);
+        }
+        const job = await jobRes.json();
+        if (!originalDownloaded && job.filename_original) {
+          await downloadOne("original", job.filename_original);
+          originalDownloaded = true;
+        }
+        if (job.status === "error") {
+          if (originalDownloaded) {
+            showStatus(`文件 ${queueIndex}/${queueTotal}：翻译失败，但原字幕已下载`, "error");
+            return { ok: false };
           }
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = name;
-          a.click();
-          URL.revokeObjectURL(a.href);
-        };
-        const poll = async () => {
-          const jobRes = await fetch(`/api/jobs/${job_id}`);
-          if (!jobRes.ok) {
-            const err = await jobRes.json().catch(() => ({ detail: jobRes.statusText }));
-            throw new Error(err.detail || jobRes.statusText);
-          }
-          const job = await jobRes.json();
-          if (!originalDownloaded && job.filename_original) {
-            await downloadOne("original", job.filename_original);
-            originalDownloaded = true;
-          }
-          if (job.status === "error") {
-            if (originalDownloaded) {
-              showStatus("翻译失败，但原字幕已下载", "error");
-              cancelBtn.disabled = true;
-              submitBtn.disabled = false;
-              return true;
+          throw new Error(job.error || "任务失败");
+        }
+        if (job.status === "canceled") {
+          throw new Error("任务已取消");
+        }
+        if (job.status === "done") {
+          if (job.filename_original) {
+            if (!originalDownloaded) {
+              await downloadOne("original", job.filename_original);
             }
-            throw new Error(job.error || "任务失败");
+            await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+          } else {
+            await downloadOne(null, file.name.replace(/\.[^.]+$/, "") + ".srt");
           }
-          if (job.status === "canceled") {
-            showStatus("任务已取消", "success");
-            showProgress(0, null);
-            cancelBtn.disabled = true;
-            submitBtn.disabled = false;
-            return true;
-          }
-          if (job.status === "done") {
-            if (job.filename_original) {
-              if (!originalDownloaded) {
-                await downloadOne("original", job.filename_original);
-              }
-              await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
-              showStatus("任务完成，已下载：未翻译 + 翻译版", "success");
-            } else {
-              await downloadOne(null, file.name.replace(/\.[^.]+$/, "") + ".srt");
-              showStatus("任务完成，字幕已开始下载", "success");
-            }
-            showProgress(100, null);
-            submitBtn.disabled = false;
-            cancelBtn.disabled = true;
-            return true;
-          }
-          const msg = job.message || "处理中…";
-          showStatus(`<span class="spinner"></span>${msg}`, "loading");
-          const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
-          showProgress(progressVal, job.eta_seconds ?? null);
-          return false;
-        };
+          showProgress(100, null);
+          showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
+          return { ok: true };
+        }
+        const msg = job.message || "处理中…";
+        showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msg}`, "loading");
+        const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
+        showProgress(progressVal, job.eta_seconds ?? null);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
 
-        let done = false;
-        while (!done) {
-          done = await poll();
-          if (!done) await new Promise((r) => setTimeout(r, 1000));
+    submitBtn.addEventListener("click", async () => {
+      const files = selectedFiles.length ? selectedFiles : Array.from(fileInput.files || []);
+      const onlyTranslate = workMode.value === "translate_only";
+      if (!files.length) {
+        showStatus(onlyTranslate ? "请先选择 .srt 字幕文件" : "请先选择视频或音频文件", "error");
+        return;
+      }
+      if (onlyTranslate) {
+        if (files.some((f) => !f.name.toLowerCase().endsWith(".srt"))) {
+          showStatus("仅翻译模式请上传 .srt 文件", "error");
+          return;
+        }
+        if (translationApi.value === "none" || translateTo.value === "none") {
+          showStatus("请选择翻译 API 与目标语言", "error");
+          return;
+        }
+      }
+
+      saveApiConfig();
+      submitBtn.disabled = true;
+      cancelBtn.disabled = false;
+      stopQueue = false;
+
+      let okCount = 0;
+      let failCount = 0;
+      try {
+        for (let i = 0; i < files.length; i++) {
+          if (stopQueue) break;
+          const file = files[i];
+          fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
+          showStatus(`<span class="spinner"></span>队列执行中（${i + 1}/${files.length}）`, "loading");
+          showProgress(0, null);
+          try {
+            const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length);
+            if (result.ok) okCount += 1;
+            else failCount += 1;
+          } catch (e) {
+            failCount += 1;
+            if (stopQueue || String(e.message || e).includes("取消")) {
+              break;
+            }
+            showStatus(`文件 ${i + 1}/${files.length} 失败：${e.message || String(e)}`, "error");
+          }
+        }
+        if (stopQueue) {
+          showStatus(`队列已停止：成功 ${okCount}，失败 ${failCount}`, "success");
+        } else if (files.length > 1) {
+          showStatus(`队列完成：成功 ${okCount}，失败 ${failCount}`, failCount ? "error" : "success");
         }
       } catch (e) {
         progressBarWrap.style.display = "none";
         progressEta.textContent = "";
         showStatus("失败：" + (e.message || String(e)), "error");
       } finally {
-        if (submitBtn.disabled) submitBtn.disabled = false;
+        currentJobId = null;
         cancelBtn.disabled = true;
+        submitBtn.disabled = false;
       }
     });
   </script>
