@@ -1004,6 +1004,7 @@ def translate_segments(
             user_content = json.dumps(batch_texts, ensure_ascii=False)
 
             translated_items: Optional[List[str]] = None
+            batch_failed = False
             for attempt in range(4):
                 try:
                     resp = client.chat.completions.create(
@@ -1018,7 +1019,13 @@ def translate_segments(
                     # 兼容模型偶发返回 ```json ... ```
                     raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
                     raw = re.sub(r"\s*```$", "", raw).strip()
-                    parsed = json.loads(raw)
+                    try:
+                        parsed = json.loads(raw)
+                    except Exception:
+                        m = re.search(r"\[[\s\S]*\]", raw)
+                        if not m:
+                            raise
+                        parsed = json.loads(m.group(0))
                     if not isinstance(parsed, list) or len(parsed) != len(batch_texts):
                         raise ValueError("OpenAI 返回格式不符合预期")
                     translated_items = [str(x).strip() if x is not None else "" for x in parsed]
@@ -1041,10 +1048,45 @@ def translate_segments(
                     if attempt < 3:
                         time.sleep(2 ** (attempt + 1))
                     else:
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"翻译失败（openai）: {e!s}",
-                        ) from e
+                        batch_failed = True
+
+            if translated_items is None and batch_failed:
+                # 批量 JSON 解析/格式失败时降级逐条翻译，避免任务中断
+                translated_items = []
+                single_system = f"You are a translator. Output only the translation in {lang_name}, no explanation."
+                if rules:
+                    single_system = (
+                        f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
+                        f"Output only the translation in {lang_name}, no explanation."
+                    )
+                for _idx, _seg, src_text in batch_meta:
+                    one_translated: Optional[str] = None
+                    for attempt in range(4):
+                        try:
+                            one_resp = client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {"role": "system", "content": single_system},
+                                    {"role": "user", "content": src_text},
+                                ],
+                                max_tokens=1024,
+                            )
+                            one_translated = (one_resp.choices[0].message.content or "").strip() or src_text
+                            break
+                        except OpenAIRateLimitError as e:
+                            if attempt < 3:
+                                time.sleep(2 ** (attempt + 1))
+                            else:
+                                raise HTTPException(
+                                    status_code=429,
+                                    detail="OpenAI 请求过于频繁（限流）。请稍后再试，或在 platform.openai.com/account/limits 查看并提升用量/限流额度。",
+                                ) from e
+                        except Exception:
+                            if attempt < 3:
+                                time.sleep(2 ** (attempt + 1))
+                            else:
+                                one_translated = src_text
+                    translated_items.append(one_translated if one_translated is not None else src_text)
 
             if translated_items is None:
                 raise HTTPException(status_code=500, detail="翻译失败（openai）: 未获取到有效返回")
