@@ -766,6 +766,8 @@
       currentJobId = job_id;
 
       let originalDownloaded = false;
+      let lastJobMsg = "";
+      let lastJobMsgAt = Date.now();
       const downloadOne = async (fileParam, defaultName) => {
         const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
         await triggerDownload(url, defaultName);
@@ -833,9 +835,18 @@
           showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
           return { ok: true };
         }
-        const msg = job.message || "处理中…";
-        showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msg}`, "loading");
         const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
+        const msg = job.message || "处理中…";
+        if (msg !== lastJobMsg) {
+          lastJobMsg = msg;
+          lastJobMsgAt = Date.now();
+        }
+        let msgDisplay = msg;
+        const waitingSec = Math.floor((Date.now() - lastJobMsgAt) / 1000);
+        if ((job.stage === "translating" || job.stage === "transcribing") && (progressVal === 0 || progressVal === null) && waitingSec >= 10) {
+          msgDisplay = `${msg}（等待模型响应中 ${waitingSec}s）`;
+        }
+        showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msgDisplay}`, "loading");
         showProgress(progressVal, job.eta_seconds ?? null);
         await new Promise((r) => setTimeout(r, 1000));
       }
