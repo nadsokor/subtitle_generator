@@ -1008,7 +1008,7 @@ def translate_segments(
                     f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
                     f"Output only the translation in {lang_name}, no explanation."
                 )
-            for attempt in range(4):
+            for attempt in range(2):
                 try:
                     one_resp = client.chat.completions.create(
                         model=model,
@@ -1021,7 +1021,7 @@ def translate_segments(
                     )
                     return (one_resp.choices[0].message.content or "").strip() or src_text
                 except OpenAIRateLimitError as e:
-                    if attempt < 3:
+                    if attempt < 1:
                         time.sleep(2 ** (attempt + 1))
                     else:
                         raise HTTPException(
@@ -1029,7 +1029,7 @@ def translate_segments(
                             detail="OpenAI 请求过于频繁（限流）。请稍后再试，或在 platform.openai.com/account/limits 查看并提升用量/限流额度。",
                         ) from e
                 except Exception:
-                    if attempt < 3:
+                    if attempt < 1:
                         time.sleep(2 ** (attempt + 1))
                     else:
                         return src_text
@@ -1054,7 +1054,7 @@ def translate_segments(
                     "No markdown, no explanation, no extra keys."
                 )
             user_content = json.dumps(batch_texts, ensure_ascii=False)
-            for attempt in range(4):
+            for attempt in range(2):
                 try:
                     kwargs = dict(
                         model=model,
@@ -1106,7 +1106,7 @@ def translate_segments(
                     raw = (resp.choices[0].message.content or "").strip()
                     return _parse_openai_batch_json(raw, expected_len)
                 except OpenAIRateLimitError as e:
-                    if attempt < 3:
+                    if attempt < 1:
                         time.sleep(2 ** (attempt + 1))
                     else:
                         raise HTTPException(
@@ -1120,7 +1120,7 @@ def translate_segments(
                             status_code=402,
                             detail="OpenAI 报错与额度/配额有关（可能与账单预算无关）：请到 platform.openai.com/account/limits 检查「用量上限」与「限流」，或确认当前 Key 所属组织是否为付费账户。",
                         ) from e
-                    if attempt < 3:
+                    if attempt < 1:
                         time.sleep(2 ** (attempt + 1))
                     else:
                         raise RuntimeError(f"OpenAI 批量解析失败：{e!s}") from e
