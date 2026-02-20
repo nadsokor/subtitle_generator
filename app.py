@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 import zipfile
+import json
 import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List, Tuple
@@ -939,6 +940,123 @@ def translate_segments(
 
         return [x if x is not None else segments[i] for i, x in enumerate(out)]
 
+    # OpenAI: 使用单客户端 + 批量请求，减少请求次数提升速度
+    if api_name == "openai":
+        key = (openai_api_key or "").strip() or os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（openai）: 请填写 OpenAI API Key，或在服务端设置 OPENAI_API_KEY",
+            )
+        model = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
+        lang_name = OPENAI_TARGET_LANG_NAMES.get(
+            target_lang if target_lang != "zh-CN" else "zh", "English"
+        )
+        rules = (translation_rules or "").strip()
+        base_url = (openai_base_url or "").strip() or os.environ.get("OPENAI_BASE_URL")
+        client = OpenAI(api_key=key, base_url=base_url or None)
+
+        out: List[Optional[dict]] = [None] * total
+        pending: List[Tuple[int, dict, str]] = []
+        done = 0
+        for idx, seg in enumerate(segments, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                out[idx - 1] = seg
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+                continue
+            pending.append((idx, seg, text))
+
+        batch_max_items = 20
+        batch_max_chars = 8000
+        pos = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta: List[Tuple[int, dict, str]] = []
+            batch_texts: List[str] = []
+            chars = 0
+            while pos < len(pending) and len(batch_meta) < batch_max_items:
+                m = pending[pos]
+                t = m[2]
+                if batch_meta and chars + len(t) > batch_max_chars:
+                    break
+                batch_meta.append(m)
+                batch_texts.append(t)
+                chars += len(t)
+                pos += 1
+
+            system_content = (
+                f"You are a translator. Translate every string to {lang_name}. "
+                "Return ONLY a valid JSON array of translated strings with the same length and order. "
+                "No markdown, no explanation."
+            )
+            if rules:
+                system_content = (
+                    f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
+                    f"Translate every string to {lang_name}. Return ONLY a valid JSON array of translated strings "
+                    "with the same length and order. No markdown, no explanation."
+                )
+            user_content = json.dumps(batch_texts, ensure_ascii=False)
+
+            translated_items: Optional[List[str]] = None
+            for attempt in range(4):
+                try:
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_content},
+                            {"role": "user", "content": user_content},
+                        ],
+                        max_tokens=4096,
+                    )
+                    raw = (resp.choices[0].message.content or "").strip()
+                    # 兼容模型偶发返回 ```json ... ```
+                    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+                    raw = re.sub(r"\s*```$", "", raw).strip()
+                    parsed = json.loads(raw)
+                    if not isinstance(parsed, list) or len(parsed) != len(batch_texts):
+                        raise ValueError("OpenAI 返回格式不符合预期")
+                    translated_items = [str(x).strip() if x is not None else "" for x in parsed]
+                    break
+                except OpenAIRateLimitError as e:
+                    if attempt < 3:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="OpenAI 请求过于频繁（限流）。请稍后再试，或在 platform.openai.com/account/limits 查看并提升用量/限流额度。",
+                        ) from e
+                except Exception as e:
+                    err_msg = str(e)
+                    if "insufficient_quota" in err_msg.lower() or "quota" in err_msg.lower():
+                        raise HTTPException(
+                            status_code=402,
+                            detail="OpenAI 报错与额度/配额有关（可能与账单预算无关）：请到 platform.openai.com/account/limits 检查「用量上限」与「限流」，或确认当前 Key 所属组织是否为付费账户。",
+                        ) from e
+                    if attempt < 3:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"翻译失败（openai）: {e!s}",
+                        ) from e
+
+            if translated_items is None:
+                raise HTTPException(status_code=500, detail="翻译失败（openai）: 未获取到有效返回")
+
+            for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
+                out[idx - 1] = {**seg, "text": translated or src_text}
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+
+        return [x if x is not None else segments[i] for i, x in enumerate(out)]
+
     out = []
     for idx, seg in enumerate(segments, 1):
         if cancel_event and cancel_event.is_set():
@@ -958,50 +1076,7 @@ def translate_segments(
                 )
                 translated = translator.translate(text)
             elif api_name == "openai":
-                key = (openai_api_key or "").strip() or os.environ.get("OPENAI_API_KEY")
-                if not key:
-                    raise ValueError("请填写 OpenAI API Key，或在服务端设置 OPENAI_API_KEY")
-                model = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
-                lang_name = OPENAI_TARGET_LANG_NAMES.get(
-                    target_lang if target_lang != "zh-CN" else "zh", "English"
-                )
-                rules = (translation_rules or "").strip()
-                system_content = f"You are a translator. Output only the translation in {lang_name}, no explanation."
-                if rules:
-                    system_content = f"You are a translator. Style and rules you must follow:\n{rules}\n\nOutput only the translation in {lang_name}, no explanation."
-                base_url = (openai_base_url or "").strip() or os.environ.get("OPENAI_BASE_URL")
-                client = OpenAI(api_key=key, base_url=base_url or None)
-                translated = None
-                for attempt in range(4):
-                    try:
-                        resp = client.chat.completions.create(
-                            model=model,
-                            messages=[
-                                {"role": "system", "content": system_content},
-                                {"role": "user", "content": text},
-                            ],
-                            max_tokens=1024,
-                        )
-                        translated = (resp.choices[0].message.content or "").strip() or text
-                        break
-                    except OpenAIRateLimitError as e:
-                        if attempt < 3:
-                            time.sleep(2 ** (attempt + 1))
-                        else:
-                            raise HTTPException(
-                                status_code=429,
-                                detail="OpenAI 请求过于频繁（限流）。请稍后再试，或在 platform.openai.com/account/limits 查看并提升用量/限流额度。",
-                            ) from e
-                    except Exception as e:
-                        err_msg = str(e)
-                        if "insufficient_quota" in err_msg.lower() or "quota" in err_msg.lower():
-                            raise HTTPException(
-                                status_code=402,
-                                detail="OpenAI 报错与额度/配额有关（可能与账单预算无关）：请到 platform.openai.com/account/limits 检查「用量上限」与「限流」，或确认当前 Key 所属组织是否为付费账户。",
-                            ) from e
-                        raise
-                if translated is None:
-                    translated = text
+                translated = text
             else:
                 translated = text
         except Exception as e:
