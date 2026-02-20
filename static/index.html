@@ -827,7 +827,7 @@
             }
             await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
           } else {
-            await downloadOne(null, file.name.replace(/\.[^.]+$/, "") + ".srt");
+            await downloadOne(null, job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
           }
           showProgress(100, null);
           showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");

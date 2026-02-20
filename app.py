@@ -973,6 +973,34 @@ def translate_segments(
 
         batch_max_items = 20
         batch_max_chars = 8000
+
+        def _parse_openai_batch_json(raw_text: str, expected_len: int) -> List[str]:
+            raw = (raw_text or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+            raw = re.sub(r"\s*```$", "", raw).strip()
+            parsed: Any
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                # 尝试提取 JSON 对象或数组
+                m_obj = re.search(r"\{[\s\S]*\}", raw)
+                m_arr = re.search(r"\[[\s\S]*\]", raw)
+                if m_obj:
+                    parsed = json.loads(m_obj.group(0))
+                elif m_arr:
+                    parsed = json.loads(m_arr.group(0))
+                else:
+                    raise
+            if isinstance(parsed, dict):
+                items = parsed.get("items")
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ValueError("OpenAI 返回既不是 JSON 对象也不是数组")
+            if not isinstance(items, list) or len(items) != expected_len:
+                raise ValueError("OpenAI 返回 items 数量与请求不一致")
+            return [str(x).strip() if x is not None else "" for x in items]
+
         pos = 0
         while pos < len(pending):
             if cancel_event and cancel_event.is_set():
@@ -992,14 +1020,17 @@ def translate_segments(
 
             system_content = (
                 f"You are a translator. Translate every string to {lang_name}. "
-                "Return ONLY a valid JSON array of translated strings with the same length and order. "
-                "No markdown, no explanation."
+                "Return ONLY valid JSON object with this schema: "
+                "{\"items\": [\"translated string 1\", \"translated string 2\", ...]}. "
+                "The items length and order must exactly match input. "
+                "No markdown, no explanation, no extra keys."
             )
             if rules:
                 system_content = (
                     f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
-                    f"Translate every string to {lang_name}. Return ONLY a valid JSON array of translated strings "
-                    "with the same length and order. No markdown, no explanation."
+                    f"Translate every string to {lang_name}. Return ONLY valid JSON object with schema "
+                    "{\"items\": [...]}. items length and order must exactly match input. "
+                    "No markdown, no explanation, no extra keys."
                 )
             user_content = json.dumps(batch_texts, ensure_ascii=False)
 
@@ -1007,7 +1038,7 @@ def translate_segments(
             batch_failed = False
             for attempt in range(4):
                 try:
-                    resp = client.chat.completions.create(
+                    kwargs = dict(
                         model=model,
                         messages=[
                             {"role": "system", "content": system_content},
@@ -1015,20 +1046,16 @@ def translate_segments(
                         ],
                         max_tokens=4096,
                     )
-                    raw = (resp.choices[0].message.content or "").strip()
-                    # 兼容模型偶发返回 ```json ... ```
-                    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
-                    raw = re.sub(r"\s*```$", "", raw).strip()
+                    # 优先使用结构化输出；不支持时自动降级到纯文本 JSON 解析
                     try:
-                        parsed = json.loads(raw)
+                        resp = client.chat.completions.create(
+                            **kwargs,
+                            response_format={"type": "json_object"},
+                        )
                     except Exception:
-                        m = re.search(r"\[[\s\S]*\]", raw)
-                        if not m:
-                            raise
-                        parsed = json.loads(m.group(0))
-                    if not isinstance(parsed, list) or len(parsed) != len(batch_texts):
-                        raise ValueError("OpenAI 返回格式不符合预期")
-                    translated_items = [str(x).strip() if x is not None else "" for x in parsed]
+                        resp = client.chat.completions.create(**kwargs)
+                    raw = (resp.choices[0].message.content or "").strip()
+                    translated_items = _parse_openai_batch_json(raw, len(batch_texts))
                     break
                 except OpenAIRateLimitError as e:
                     if attempt < 3:
