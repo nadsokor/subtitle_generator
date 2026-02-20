@@ -971,8 +971,8 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        batch_max_items = 20
-        batch_max_chars = 8000
+        batch_max_items = 12
+        batch_max_chars = 5000
 
         def _parse_openai_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -1001,23 +1001,44 @@ def translate_segments(
                 raise ValueError("OpenAI 返回 items 数量与请求不一致")
             return [str(x).strip() if x is not None else "" for x in items]
 
-        pos = 0
-        while pos < len(pending):
+        def _single_translate(src_text: str) -> str:
+            single_system = f"You are a translator. Output only the translation in {lang_name}, no explanation."
+            if rules:
+                single_system = (
+                    f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
+                    f"Output only the translation in {lang_name}, no explanation."
+                )
+            for attempt in range(4):
+                try:
+                    one_resp = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": single_system},
+                            {"role": "user", "content": src_text},
+                        ],
+                        max_tokens=1024,
+                        temperature=0,
+                    )
+                    return (one_resp.choices[0].message.content or "").strip() or src_text
+                except OpenAIRateLimitError as e:
+                    if attempt < 3:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="OpenAI 请求过于频繁（限流）。请稍后再试，或在 platform.openai.com/account/limits 查看并提升用量/限流额度。",
+                        ) from e
+                except Exception:
+                    if attempt < 3:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        return src_text
+            return src_text
+
+        def _call_openai_batch(batch_texts: List[str]) -> List[str]:
+            expected_len = len(batch_texts)
             if cancel_event and cancel_event.is_set():
                 raise JobCanceled("任务已取消")
-            batch_meta: List[Tuple[int, dict, str]] = []
-            batch_texts: List[str] = []
-            chars = 0
-            while pos < len(pending) and len(batch_meta) < batch_max_items:
-                m = pending[pos]
-                t = m[2]
-                if batch_meta and chars + len(t) > batch_max_chars:
-                    break
-                batch_meta.append(m)
-                batch_texts.append(t)
-                chars += len(t)
-                pos += 1
-
             system_content = (
                 f"You are a translator. Translate every string to {lang_name}. "
                 "Return ONLY valid JSON object with this schema: "
@@ -1033,9 +1054,6 @@ def translate_segments(
                     "No markdown, no explanation, no extra keys."
                 )
             user_content = json.dumps(batch_texts, ensure_ascii=False)
-
-            translated_items: Optional[List[str]] = None
-            batch_failed = False
             for attempt in range(4):
                 try:
                     kwargs = dict(
@@ -1045,18 +1063,48 @@ def translate_segments(
                             {"role": "user", "content": user_content},
                         ],
                         max_tokens=4096,
+                        temperature=0,
                     )
-                    # 优先使用结构化输出；不支持时自动降级到纯文本 JSON 解析
+                    # 优先结构化输出（strict json_schema）；
+                    # 中转不支持时降级 json_object / 普通文本再解析。
                     try:
                         resp = client.chat.completions.create(
                             **kwargs,
-                            response_format={"type": "json_object"},
+                            response_format={
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": "translation_batch",
+                                    "strict": True,
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "minItems": expected_len,
+                                                "maxItems": expected_len,
+                                            }
+                                        },
+                                        "required": ["items"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                            },
                         )
                     except Exception:
-                        resp = client.chat.completions.create(**kwargs)
+                        try:
+                            resp = client.chat.completions.create(
+                                **kwargs,
+                                response_format={"type": "json_object"},
+                            )
+                        except Exception:
+                            resp = client.chat.completions.create(**kwargs)
+
+                    finish_reason = (resp.choices[0].finish_reason or "").lower()
+                    if finish_reason == "length":
+                        raise ValueError("OpenAI 输出被截断（finish_reason=length）")
                     raw = (resp.choices[0].message.content or "").strip()
-                    translated_items = _parse_openai_batch_json(raw, len(batch_texts))
-                    break
+                    return _parse_openai_batch_json(raw, expected_len)
                 except OpenAIRateLimitError as e:
                     if attempt < 3:
                         time.sleep(2 ** (attempt + 1))
@@ -1075,49 +1123,41 @@ def translate_segments(
                     if attempt < 3:
                         time.sleep(2 ** (attempt + 1))
                     else:
-                        batch_failed = True
+                        raise RuntimeError(f"OpenAI 批量解析失败：{e!s}") from e
 
-            if translated_items is None and batch_failed:
-                # 批量 JSON 解析/格式失败时降级逐条翻译，避免任务中断
-                translated_items = []
-                single_system = f"You are a translator. Output only the translation in {lang_name}, no explanation."
-                if rules:
-                    single_system = (
-                        f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
-                        f"Output only the translation in {lang_name}, no explanation."
-                    )
-                for _idx, _seg, src_text in batch_meta:
-                    one_translated: Optional[str] = None
-                    for attempt in range(4):
-                        try:
-                            one_resp = client.chat.completions.create(
-                                model=model,
-                                messages=[
-                                    {"role": "system", "content": single_system},
-                                    {"role": "user", "content": src_text},
-                                ],
-                                max_tokens=1024,
-                            )
-                            one_translated = (one_resp.choices[0].message.content or "").strip() or src_text
-                            break
-                        except OpenAIRateLimitError as e:
-                            if attempt < 3:
-                                time.sleep(2 ** (attempt + 1))
-                            else:
-                                raise HTTPException(
-                                    status_code=429,
-                                    detail="OpenAI 请求过于频繁（限流）。请稍后再试，或在 platform.openai.com/account/limits 查看并提升用量/限流额度。",
-                                ) from e
-                        except Exception:
-                            if attempt < 3:
-                                time.sleep(2 ** (attempt + 1))
-                            else:
-                                one_translated = src_text
-                    translated_items.append(one_translated if one_translated is not None else src_text)
+            raise RuntimeError("OpenAI 批量解析失败：未获取到有效返回")
 
-            if translated_items is None:
-                raise HTTPException(status_code=500, detail="翻译失败（openai）: 未获取到有效返回")
+        def _translate_batch_with_split(batch_meta: List[Tuple[int, dict, str]]) -> List[str]:
+            if not batch_meta:
+                return []
+            texts = [x[2] for x in batch_meta]
+            try:
+                return _call_openai_batch(texts)
+            except RuntimeError:
+                # 先拆半批重试，最后才逐条兜底
+                if len(batch_meta) == 1:
+                    return [_single_translate(batch_meta[0][2])]
+                mid = len(batch_meta) // 2
+                left = _translate_batch_with_split(batch_meta[:mid])
+                right = _translate_batch_with_split(batch_meta[mid:])
+                return left + right
 
+        pos = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta: List[Tuple[int, dict, str]] = []
+            chars = 0
+            while pos < len(pending) and len(batch_meta) < batch_max_items:
+                m = pending[pos]
+                t = m[2]
+                if batch_meta and chars + len(t) > batch_max_chars:
+                    break
+                batch_meta.append(m)
+                chars += len(t)
+                pos += 1
+
+            translated_items = _translate_batch_with_split(batch_meta)
             for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
                 out[idx - 1] = {**seg, "text": translated or src_text}
                 done += 1
