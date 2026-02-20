@@ -371,6 +371,23 @@ def _content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
+def _safe_filename_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9._-]+", "-", (value or "").strip())
+    token = token.strip("._-")
+    return token or "model"
+
+
+def _translated_suffix(translate_to: str, translation_api: str, openai_model: str) -> str:
+    parts = [translate_to]
+    api_name = (translation_api or "").strip().lower()
+    if api_name and api_name not in ("none", "openai"):
+        parts.append(_safe_filename_token(api_name))
+    if api_name == "openai":
+        model_name = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
+        parts.append(_safe_filename_token(model_name))
+    return "." + ".".join(parts)
+
+
 def segments_to_srt(segments: list) -> str:
     """Whisper 的 segments 转为 SRT 文本"""
     lines = []
@@ -1296,7 +1313,7 @@ async def transcribe_video(
         input_path = tmp.name
 
     base_name = Path(file.filename or "video").stem
-    out_suffix = f".{translate_to}" if (translate_to and translate_to != "none") else ""
+    out_suffix = _translated_suffix(translate_to, translation_api, openai_model) if (translate_to and translate_to != "none") else ""
     filename = f"{base_name}{out_suffix}.srt"
     filename_original = f"{base_name}.srt" if (translate_to and translate_to != "none") else None
     job_id = str(uuid.uuid4())
@@ -1354,7 +1371,8 @@ async def translate_only(
         srt_path = tmp.name
 
     base_name = Path(file.filename or "subtitle").stem
-    filename = f"{base_name}.{translate_to}.srt"
+    out_suffix = _translated_suffix(translate_to, translation_api, openai_model)
+    filename = f"{base_name}{out_suffix}.srt"
     job_id = str(uuid.uuid4())
     _init_job(job_id, filename)
 
