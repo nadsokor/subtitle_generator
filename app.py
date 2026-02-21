@@ -773,6 +773,7 @@ def _process_job(
                 openai_model=openai_model or None,
                 translation_rules=translation_rules or None,
                 progress_cb=translate_progress,
+                status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
                 cancel_event=cancel_event,
             )
 
@@ -840,6 +841,7 @@ def _process_translate_only_job(
             openai_model=openai_model or None,
             translation_rules=translation_rules or None,
             progress_cb=translate_progress,
+            status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
             cancel_event=cancel_event,
         )
         srt_content = segments_to_srt(translated)
@@ -872,6 +874,7 @@ def translate_segments(
     openai_model: str | None = None,
     translation_rules: str | None = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    status_cb: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> list:
     """
@@ -966,6 +969,8 @@ def translate_segments(
                 detail="翻译失败（openai）: 请填写 OpenAI API Key，或在服务端设置 OPENAI_API_KEY",
             )
         model = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
+        model_lc = model.lower()
+        gpt5_mode = "gpt-5" in model_lc
         lang_name = OPENAI_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
@@ -988,8 +993,8 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        batch_max_items = 12
-        batch_max_chars = 5000
+        batch_max_items = 6 if gpt5_mode else 12
+        batch_max_chars = 2500 if gpt5_mode else 5000
 
         def _parse_openai_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -1082,33 +1087,8 @@ def translate_segments(
                         max_tokens=4096,
                         temperature=0,
                     )
-                    # 优先结构化输出（strict json_schema）；
-                    # 中转不支持时降级 json_object / 普通文本再解析。
-                    try:
-                        resp = client.chat.completions.create(
-                            **kwargs,
-                            response_format={
-                                "type": "json_schema",
-                                "json_schema": {
-                                    "name": "translation_batch",
-                                    "strict": True,
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "items": {
-                                                "type": "array",
-                                                "items": {"type": "string"},
-                                                "minItems": expected_len,
-                                                "maxItems": expected_len,
-                                            }
-                                        },
-                                        "required": ["items"],
-                                        "additionalProperties": False,
-                                    },
-                                },
-                            },
-                        )
-                    except Exception:
+                    # gpt-5 默认走非 strict，减少中转兼容问题
+                    if gpt5_mode:
                         try:
                             resp = client.chat.completions.create(
                                 **kwargs,
@@ -1116,6 +1096,40 @@ def translate_segments(
                             )
                         except Exception:
                             resp = client.chat.completions.create(**kwargs)
+                    else:
+                        # 其他模型优先 strict 结构化输出
+                        try:
+                            resp = client.chat.completions.create(
+                                **kwargs,
+                                response_format={
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                        "name": "translation_batch",
+                                        "strict": True,
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "items": {
+                                                    "type": "array",
+                                                    "items": {"type": "string"},
+                                                    "minItems": expected_len,
+                                                    "maxItems": expected_len,
+                                                }
+                                            },
+                                            "required": ["items"],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                },
+                            )
+                        except Exception:
+                            try:
+                                resp = client.chat.completions.create(
+                                    **kwargs,
+                                    response_format={"type": "json_object"},
+                                )
+                            except Exception:
+                                resp = client.chat.completions.create(**kwargs)
 
                     finish_reason = (resp.choices[0].finish_reason or "").lower()
                     if finish_reason == "length":
@@ -1160,6 +1174,7 @@ def translate_segments(
                 return left + right
 
         pos = 0
+        batch_no = 0
         while pos < len(pending):
             if cancel_event and cancel_event.is_set():
                 raise JobCanceled("任务已取消")
@@ -1174,6 +1189,9 @@ def translate_segments(
                 chars += len(t)
                 pos += 1
 
+            batch_no += 1
+            if status_cb:
+                status_cb(f"第 {batch_no} 批等待返回中…")
             translated_items = _translate_batch_with_split(batch_meta)
             for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
                 out[idx - 1] = {**seg, "text": translated or src_text}
