@@ -9,3 +9,5 @@ ffmpeg-python>=0.2.0
 deep-translator>=1.11.0
 deepl>=1.28.0
 openai>=1.0.0
+google-genai>=1.47.0; python_version >= "3.9" and python_version < "3.10"
+google-genai>=1.64.0; python_version >= "3.10"

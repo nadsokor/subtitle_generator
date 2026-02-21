@@ -11,15 +11,16 @@
 - **语言**：支持指定字幕语言或自动检测
 - **翻译**：可选将字幕翻译成另一种语言
   - **Google 翻译**：免密钥
-  - **DeepL**、**OpenAI**：需在页面或环境变量中配置 API Key
-  - **OpenAI** 支持选择模型（含 gpt-5、gpt-4o-mini 等）及「自定义」输入模型名
-  - **翻译风格与规则**：可选填写说明（仅 OpenAI 生效），如语气、专有名词保留等
+  - **DeepL**、**OpenAI**、**Gemini**：需在页面或环境变量中配置 API Key
+  - **OpenAI / Gemini** 支持选择模型及「自定义」输入模型名
+  - **批量翻译**：DeepL / OpenAI / Gemini 会自动分批请求，减少请求次数并提升效率
+  - **翻译风格与规则**：可选填写说明（OpenAI / Gemini 生效），如语气、专有名词保留等
 - **ffmpeg 集成**：若未检测到系统 ffmpeg，可在页面「一键下载并安装」到应用目录，无需手动配置 PATH
 - **任务进度**：网页端展示下载模型、转写、翻译的进度条与预计剩余时间
 
 ## 环境要求
 
-- **Python 3.8+**
+- **Python 3.8+**（使用 Gemini 翻译需 **Python 3.9+**）
 - **ffmpeg**：用于处理音视频。可二选一：
   - 系统已安装并加入 PATH（推荐：`brew install ffmpeg` / `apt install ffmpeg` 等）
   - 或使用应用内「一键安装」：未检测到时在首页点击按钮，自动下载到项目 `.ffmpeg/` 并仅对当前进程生效
@@ -72,8 +73,8 @@ uvicorn app:app --host 0.0.0.0 --port 8765
    - **识别引擎**：可选 Whisper 原版、faster-whisper（更快）或 Purfview XXL（exe）
 4. 选择 **字幕语言**：若已知语种可指定，否则选「自动检测」
 5. （可选）**翻译**：
-   - 在「翻译 API」中选 Google / DeepL / OpenAI，在「翻译成」中选目标语言
-   - 选 OpenAI 时可在「API 配置」中填写 API Key、选择模型（含「自定义」输入模型名），以及「翻译风格与规则」
+   - 在「翻译 API」中选 Google / DeepL / OpenAI / Gemini，在「翻译成」中选目标语言
+   - 选 OpenAI 或 Gemini 时可在「API 配置」中填写 API Key、选择模型（含「自定义」输入模型名），以及「翻译风格与规则」
    - 选 DeepL 时填写 DeepL API Key；配置会保存在浏览器本地，下次自动带出
 6. 点击 **「生成字幕」**，等待任务完成（页面会显示进度条与预计剩余时间）
 7. 完成后会自动下载 `.srt` 文件（若启用了翻译，文件名为 `原名.语言码.srt`，如 `demo.zh.srt`）
@@ -83,6 +84,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 - **Google 翻译**：无需配置，直接可用（需网络）
 - **DeepL**：在 [DeepL 开发者](https://www.deepl.com/pro-api) 获取 API Key，在页面「翻译」→ 选 DeepL 后出现的输入框中填写，或设置环境变量 `DEEPL_API_KEY` / `DEEPL_AUTH_KEY`
 - **OpenAI**：在 [OpenAI API](https://platform.openai.com/api-keys) 创建 Key，在页面填写或设置 `OPENAI_API_KEY`；可选环境变量 `OPENAI_TRANSLATE_MODEL` 指定默认模型
+- **Gemini**：在 [Gemini API](https://ai.google.dev/gemini-api/docs/api-key) 创建 Key，在页面填写或设置 `GEMINI_API_KEY`；可选环境变量 `GEMINI_TRANSLATE_MODEL` 指定默认模型
 
 ## 项目结构
 
@@ -125,7 +127,7 @@ auto_subbed/
 
 ## 技术说明
 
-- **后端**：FastAPI + OpenAI Whisper（`openai-whisper`）+ 翻译（`deep-translator`：Google / DeepL；OpenAI 使用 Chat Completions）
+- **后端**：FastAPI + OpenAI Whisper（`openai-whisper`）+ 翻译（`deep-translator`：Google，`deepl`：DeepL，`openai`：OpenAI Chat Completions，`google-genai`：Gemini）
 - **Purfview XXL（可选）**：将 `faster-whisper-xxl.exe` 放到 `app.py` 同级的 `.models/purfview-xxl/`，选择引擎为 `Purfview XXL（exe）` 即可调用
 - **前端**：单页 HTML + 原生 JS，无构建步骤；配置与 API Key 使用 localStorage 持久化
 - **ffmpeg**：优先使用系统 PATH；若无则从 BtbN（Windows/Linux）或 evermeet（macOS）下载并解压到 `.ffmpeg/<平台>`，仅当前进程 PATH 生效
