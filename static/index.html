@@ -345,6 +345,7 @@
             <option value="google">Google 翻译</option>
             <option value="deepl">DeepL</option>
             <option value="openai">OpenAI</option>
+            <option value="gemini">Gemini</option>
           </select>
         </div>
         <div class="field">
@@ -398,6 +399,25 @@
           <input type="text" id="openaiModelCustom" placeholder="例如：gpt-5.2 或 gpt-5mini" autocomplete="off" />
         </div>
       </div>
+      <div id="apiConfigGemini" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+        <div class="field">
+          <label for="geminiApiKey">Gemini API Key</label>
+          <input type="password" id="geminiApiKey" placeholder="AIza..." autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="geminiModel">Gemini 翻译模型</label>
+          <select id="geminiModel">
+            <option value="custom">自定义…</option>
+            <option value="gemini-2.5-flash" selected>gemini-2.5-flash（推荐）</option>
+            <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+            <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+          </select>
+        </div>
+        <div class="field" id="geminiModelCustomWrap" style="display: none;">
+          <label for="geminiModelCustom">自定义模型名</label>
+          <input type="text" id="geminiModelCustom" placeholder="例如：gemini-2.5-flash-lite" autocomplete="off" />
+        </div>
+      </div>
       <div id="apiConfigDeepl" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
           <label for="deeplApiKey">DeepL API Key</label>
@@ -407,7 +427,7 @@
       <div id="apiConfigRules" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
           <label for="translationRules">翻译风格与规则（可选）</label>
-          <textarea id="translationRules" rows="3" placeholder="例如：使用正式语气；品牌名、专有名词保留英文；译成简体中文口语化表达。仅 OpenAI 翻译时生效。" style="width:100%;padding:0.6rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.9rem;resize:vertical;font-family:inherit;"></textarea>
+          <textarea id="translationRules" rows="3" placeholder="例如：使用正式语气；品牌名、专有名词保留英文；译成简体中文口语化表达。仅 OpenAI / Gemini 翻译时生效。" style="width:100%;padding:0.6rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.9rem;resize:vertical;font-family:inherit;"></textarea>
         </div>
       </div>
     </div>
@@ -429,7 +449,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.5";
+    const APP_VERSION = "1.6";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -445,8 +465,13 @@
     const openaiModel = document.getElementById("openaiModel");
     const openaiModelCustom = document.getElementById("openaiModelCustom");
     const openaiModelCustomWrap = document.getElementById("openaiModelCustomWrap");
+    const geminiApiKey = document.getElementById("geminiApiKey");
+    const geminiModel = document.getElementById("geminiModel");
+    const geminiModelCustom = document.getElementById("geminiModelCustom");
+    const geminiModelCustomWrap = document.getElementById("geminiModelCustomWrap");
     const deeplApiKey = document.getElementById("deeplApiKey");
     const apiConfigOpenai = document.getElementById("apiConfigOpenai");
+    const apiConfigGemini = document.getElementById("apiConfigGemini");
     const apiConfigDeepl = document.getElementById("apiConfigDeepl");
     const apiConfigRules = document.getElementById("apiConfigRules");
     const translationRules = document.getElementById("translationRules");
@@ -464,6 +489,7 @@
     const uploadZoneLabel = document.getElementById("uploadZoneLabel");
     const uploadZoneHint = document.getElementById("uploadZoneHint");
     const cardRecognize = document.getElementById("cardRecognize");
+    const cardTranslate = document.getElementById("cardTranslate");
     const translateHint = document.getElementById("translateHint");
     const workModeHint = document.getElementById("workModeHint");
 
@@ -564,6 +590,9 @@
         if (data.openai_base_url) openaiBaseUrl.value = data.openai_base_url;
         if (data.openai_model) openaiModel.value = data.openai_model;
         if (data.openai_model_custom) openaiModelCustom.value = data.openai_model_custom;
+        if (data.gemini_api_key) geminiApiKey.value = data.gemini_api_key;
+        if (data.gemini_model) geminiModel.value = data.gemini_model;
+        if (data.gemini_model_custom) geminiModelCustom.value = data.gemini_model_custom;
         if (data.deepl_api_key) deeplApiKey.value = data.deepl_api_key;
         if (data.translation_rules != null) translationRules.value = data.translation_rules;
       } catch (_) {}
@@ -604,6 +633,9 @@
           openai_base_url: openaiBaseUrl.value.trim(),
           openai_model: openaiModel.value,
           openai_model_custom: openaiModelCustom.value.trim(),
+          gemini_api_key: geminiApiKey.value.trim(),
+          gemini_model: geminiModel.value,
+          gemini_model_custom: geminiModelCustom.value.trim(),
           deepl_api_key: deeplApiKey.value.trim(),
           translation_rules: translationRules.value,
         };
@@ -613,8 +645,9 @@
 
     function showApiConfigFor(api) {
       apiConfigOpenai.style.display = api === "openai" ? "block" : "none";
+      apiConfigGemini.style.display = api === "gemini" ? "block" : "none";
       apiConfigDeepl.style.display = api === "deepl" ? "block" : "none";
-      apiConfigRules.style.display = api === "openai" ? "block" : "none";
+      apiConfigRules.style.display = (api === "openai" || api === "gemini") ? "block" : "none";
     }
 
     loadApiConfig();
@@ -628,6 +661,11 @@
     openaiModelCustomWrap.style.display = openaiModel.value === "custom" ? "block" : "none";
     openaiModel.addEventListener("change", () => {
       openaiModelCustomWrap.style.display = openaiModel.value === "custom" ? "block" : "none";
+      saveApiConfig();
+    });
+    geminiModelCustomWrap.style.display = geminiModel.value === "custom" ? "block" : "none";
+    geminiModel.addEventListener("change", () => {
+      geminiModelCustomWrap.style.display = geminiModel.value === "custom" ? "block" : "none";
       saveApiConfig();
     });
     workMode.addEventListener("change", () => {
@@ -645,6 +683,10 @@
     openaiBaseUrl.addEventListener("blur", saveApiConfig);
     openaiModelCustom.addEventListener("change", saveApiConfig);
     openaiModelCustom.addEventListener("blur", saveApiConfig);
+    geminiApiKey.addEventListener("change", saveApiConfig);
+    geminiApiKey.addEventListener("blur", saveApiConfig);
+    geminiModelCustom.addEventListener("change", saveApiConfig);
+    geminiModelCustom.addEventListener("blur", saveApiConfig);
     deeplApiKey.addEventListener("change", saveApiConfig);
     deeplApiKey.addEventListener("blur", saveApiConfig);
     translationRules.addEventListener("change", saveApiConfig);
@@ -742,11 +784,16 @@
       form.append("translate_to", translateTo.value);
       if (openaiApiKey.value.trim()) form.append("openai_api_key", openaiApiKey.value.trim());
       if (openaiBaseUrl.value.trim()) form.append("openai_base_url", openaiBaseUrl.value.trim());
+      if (geminiApiKey.value.trim()) form.append("gemini_api_key", geminiApiKey.value.trim());
       if (deeplApiKey.value.trim()) form.append("deepl_api_key", deeplApiKey.value.trim());
-      const selectedModel = openaiModel.value === "custom"
+      const selectedOpenaiModel = openaiModel.value === "custom"
         ? (openaiModelCustom.value.trim() || "gpt-4o-mini")
         : openaiModel.value;
-      form.append("openai_model", selectedModel);
+      const selectedGeminiModel = geminiModel.value === "custom"
+        ? (geminiModelCustom.value.trim() || "gemini-2.5-flash")
+        : geminiModel.value;
+      form.append("openai_model", selectedOpenaiModel);
+      form.append("gemini_model", selectedGeminiModel);
       if (translationRules.value.trim()) form.append("translation_rules", translationRules.value.trim());
 
       const apiUrl = onlyTranslate ? "/api/translate" : "/api/transcribe";

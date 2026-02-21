@@ -31,6 +31,11 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+try:
+    from google import genai
+except Exception:
+    genai = None
+
 # 允许的视频/音频格式（ffmpeg 可处理）
 ALLOWED_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
@@ -86,6 +91,7 @@ TRANSLATION_APIS = [
     ("google", "Google 翻译"),
     ("deepl", "DeepL"),
     ("openai", "OpenAI"),
+    ("gemini", "Gemini"),
 ]
 
 # 部分语言在翻译 API 中的目标代码（与 Whisper 不一致时）
@@ -93,8 +99,8 @@ TRANSLATOR_TARGET_MAP = {
     "zh": "zh-CN",  # Google 使用 zh-CN
 }
 
-# OpenAI 翻译时目标语言英文名（用于 prompt）
-OPENAI_TARGET_LANG_NAMES = {
+# OpenAI/Gemini 翻译时目标语言英文名（用于 prompt）
+LLM_TARGET_LANG_NAMES = {
     "zh": "Simplified Chinese", "en": "English", "ja": "Japanese", "ko": "Korean",
     "fr": "French", "de": "German", "es": "Spanish", "ru": "Russian", "pt": "Portuguese",
     "it": "Italian", "nl": "Dutch", "pl": "Polish", "tr": "Turkish", "vi": "Vietnamese",
@@ -109,6 +115,13 @@ OPENAI_TRANSLATE_MODELS = [
     ("gpt-4-turbo", "gpt-4-turbo"),
     ("gpt-4", "gpt-4"),
     ("gpt-3.5-turbo", "gpt-3.5-turbo"),
+]
+
+# 前端可选的 Gemini 翻译模型
+GEMINI_TRANSLATE_MODELS = [
+    ("gemini-2.5-flash", "gemini-2.5-flash（推荐）"),
+    ("gemini-2.5-pro", "gemini-2.5-pro"),
+    ("gemini-2.0-flash", "gemini-2.0-flash"),
 ]
 
 app = FastAPI(title="视频自动字幕", description="本地 Whisper 多语字幕生成")
@@ -377,13 +390,16 @@ def _safe_filename_token(value: str) -> str:
     return token or "model"
 
 
-def _translated_suffix(translate_to: str, translation_api: str, openai_model: str) -> str:
+def _translated_suffix(translate_to: str, translation_api: str, openai_model: str, gemini_model: str) -> str:
     parts = [translate_to]
     api_name = (translation_api or "").strip().lower()
-    if api_name and api_name not in ("none", "openai"):
+    if api_name and api_name not in ("none", "openai", "gemini"):
         parts.append(_safe_filename_token(api_name))
     if api_name == "openai":
         model_name = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
+        parts.append(_safe_filename_token(model_name))
+    if api_name == "gemini":
+        model_name = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
         parts.append(_safe_filename_token(model_name))
     return "." + ".".join(parts)
 
@@ -640,6 +656,8 @@ def _process_job(
     openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
+    gemini_api_key: str,
+    gemini_model: str,
     translation_rules: str,
     base_name: str = "",
 ) -> None:
@@ -771,6 +789,8 @@ def _process_job(
                 openai_base_url=openai_base_url or None,
                 deepl_api_key=deepl_api_key or None,
                 openai_model=openai_model or None,
+                gemini_api_key=gemini_api_key or None,
+                gemini_model=gemini_model or None,
                 translation_rules=translation_rules or None,
                 progress_cb=translate_progress,
                 status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
@@ -804,6 +824,8 @@ def _process_translate_only_job(
     openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
+    gemini_api_key: str,
+    gemini_model: str,
     translation_rules: str,
     base_name: str,
 ) -> None:
@@ -839,6 +861,8 @@ def _process_translate_only_job(
             openai_base_url=openai_base_url or None,
             deepl_api_key=deepl_api_key or None,
             openai_model=openai_model or None,
+            gemini_api_key=gemini_api_key or None,
+            gemini_model=gemini_model or None,
             translation_rules=translation_rules or None,
             progress_cb=translate_progress,
             status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
@@ -872,6 +896,8 @@ def translate_segments(
     openai_base_url: str | None = None,
     deepl_api_key: str | None = None,
     openai_model: str | None = None,
+    gemini_api_key: str | None = None,
+    gemini_model: str | None = None,
     translation_rules: str | None = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     status_cb: Optional[Callable[[str], None]] = None,
@@ -879,8 +905,8 @@ def translate_segments(
 ) -> list:
     """
     将 segments 中每条 text 翻译成目标语言，时间轴不变。
-    api_name: 'google' | 'deepl' | 'openai'
-    translation_rules: 可选，自定义风格与规则（目前仅 OpenAI 支持）。
+    api_name: 'google' | 'deepl' | 'openai' | 'gemini'
+    translation_rules: 可选，自定义风格与规则（OpenAI/Gemini 支持）。
     """
     if not segments or api_name == "none":
         return segments
@@ -971,7 +997,7 @@ def translate_segments(
         model = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
         model_lc = model.lower()
         gpt5_mode = "gpt-5" in model_lc
-        lang_name = OPENAI_TARGET_LANG_NAMES.get(
+        lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
         rules = (translation_rules or "").strip()
@@ -1201,6 +1227,246 @@ def translate_segments(
 
         return [x if x is not None else segments[i] for i, x in enumerate(out)]
 
+    # Gemini: 使用单客户端 + 批量请求，减少请求次数提升速度
+    if api_name == "gemini":
+        if genai is None:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（gemini）: 未安装 google-genai，或当前 Python 版本不兼容（Gemini 需 Python 3.9+）。请先 pip install -r requirements.txt。",
+            )
+        key = (gemini_api_key or "").strip() or os.environ.get("GEMINI_API_KEY")
+        if not key:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（gemini）: 请填写 Gemini API Key，或在服务端设置 GEMINI_API_KEY",
+            )
+        model = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
+        model_lc = model.lower()
+        lang_name = LLM_TARGET_LANG_NAMES.get(
+            target_lang if target_lang != "zh-CN" else "zh", "English"
+        )
+        rules = (translation_rules or "").strip()
+        client = genai.Client(api_key=key)
+
+        out: List[Optional[dict]] = [None] * total
+        pending: List[Tuple[int, dict, str]] = []
+        done = 0
+        for idx, seg in enumerate(segments, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                out[idx - 1] = seg
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+                continue
+            pending.append((idx, seg, text))
+
+        batch_max_items = 8 if "pro" in model_lc else 16
+        batch_max_chars = 3200 if "pro" in model_lc else 6400
+
+        def _extract_gemini_text(resp: Any) -> str:
+            text = getattr(resp, "text", None)
+            if text:
+                return str(text)
+            try:
+                chunks: List[str] = []
+                candidates = getattr(resp, "candidates", None) or []
+                for cand in candidates:
+                    content = getattr(cand, "content", None)
+                    if not content:
+                        continue
+                    for part in (getattr(content, "parts", None) or []):
+                        ptxt = getattr(part, "text", None)
+                        if ptxt:
+                            chunks.append(str(ptxt))
+                return "\n".join(chunks).strip()
+            except Exception:
+                return ""
+
+        def _parse_gemini_batch_json(raw_text: str, expected_len: int) -> List[str]:
+            raw = (raw_text or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+            raw = re.sub(r"\s*```$", "", raw).strip()
+            parsed: Any
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                m_obj = re.search(r"\{[\s\S]*\}", raw)
+                m_arr = re.search(r"\[[\s\S]*\]", raw)
+                if m_obj:
+                    parsed = json.loads(m_obj.group(0))
+                elif m_arr:
+                    parsed = json.loads(m_arr.group(0))
+                else:
+                    raise
+            if isinstance(parsed, dict):
+                items = parsed.get("items")
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ValueError("Gemini 返回既不是 JSON 对象也不是数组")
+            if not isinstance(items, list) or len(items) != expected_len:
+                raise ValueError("Gemini 返回 items 数量与请求不一致")
+            return [str(x).strip() if x is not None else "" for x in items]
+
+        def _single_translate(src_text: str) -> str:
+            single_prompt = (
+                f"Translate the following text to {lang_name}. "
+                "Output only the translation text, no explanation.\n\n"
+                f"Text:\n{src_text}"
+            )
+            if rules:
+                single_prompt = (
+                    f"You are a translator. Follow these style/rules strictly:\n{rules}\n\n"
+                    f"Translate the following text to {lang_name}. "
+                    "Output only the translation text, no explanation.\n\n"
+                    f"Text:\n{src_text}"
+                )
+            for attempt in range(2):
+                try:
+                    one_resp = client.models.generate_content(
+                        model=model,
+                        contents=single_prompt,
+                        config={"temperature": 0, "max_output_tokens": 2048},
+                    )
+                    return _extract_gemini_text(one_resp).strip() or src_text
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "429" in msg or "resource_exhausted" in msg or "rate limit" in msg or "too many requests" in msg:
+                        if attempt < 1:
+                            time.sleep(2 ** (attempt + 1))
+                        else:
+                            raise HTTPException(
+                                status_code=429,
+                                detail="Gemini 请求过于频繁（限流）。请稍后再试，或在 Google AI Studio / Gemini 控制台查看配额。",
+                            ) from e
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        return src_text
+            return src_text
+
+        def _call_gemini_batch(batch_texts: List[str]) -> List[str]:
+            expected_len = len(batch_texts)
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            schema = {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": expected_len,
+                        "maxItems": expected_len,
+                    }
+                },
+                "required": ["items"],
+                "additionalProperties": False,
+            }
+            prompt = (
+                f"You are a translator. Translate every string to {lang_name}. "
+                "Return ONLY valid JSON object with this schema: "
+                "{\"items\": [\"translated string 1\", \"translated string 2\", ...]}. "
+                "The items length and order must exactly match input. "
+                "No markdown, no explanation, no extra keys.\n\n"
+                f"Input JSON array:\n{json.dumps(batch_texts, ensure_ascii=False)}"
+            )
+            if rules:
+                prompt = (
+                    f"You are a translator. Follow these style/rules strictly:\n{rules}\n\n"
+                    f"Translate every string to {lang_name}. Return ONLY valid JSON object with schema "
+                    "{\"items\": [...]}. items length and order must exactly match input. "
+                    "No markdown, no explanation, no extra keys.\n\n"
+                    f"Input JSON array:\n{json.dumps(batch_texts, ensure_ascii=False)}"
+                )
+
+            for attempt in range(2):
+                try:
+                    config_base: Dict[str, Any] = {
+                        "temperature": 0,
+                        "max_output_tokens": 8192,
+                        "response_mime_type": "application/json",
+                    }
+                    try:
+                        resp = client.models.generate_content(
+                            model=model,
+                            contents=prompt,
+                            config={**config_base, "response_json_schema": schema},
+                        )
+                    except Exception:
+                        resp = client.models.generate_content(
+                            model=model,
+                            contents=prompt,
+                            config=config_base,
+                        )
+                    raw = _extract_gemini_text(resp)
+                    return _parse_gemini_batch_json(raw, expected_len)
+                except Exception as e:
+                    err_msg = str(e)
+                    err_lc = err_msg.lower()
+                    if "insufficient_quota" in err_lc or "quota" in err_lc:
+                        raise HTTPException(
+                            status_code=402,
+                            detail="Gemini 报错与额度/配额有关：请检查 Google AI Studio / Gemini 控制台中的项目配额与账单状态。",
+                        ) from e
+                    if "429" in err_lc or "resource_exhausted" in err_lc or "rate limit" in err_lc or "too many requests" in err_lc:
+                        if attempt < 1:
+                            time.sleep(2 ** (attempt + 1))
+                        else:
+                            raise HTTPException(
+                                status_code=429,
+                                detail="Gemini 请求过于频繁（限流）。请稍后再试，或在 Google AI Studio / Gemini 控制台查看配额。",
+                            ) from e
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise RuntimeError(f"Gemini 批量解析失败：{e!s}") from e
+            raise RuntimeError("Gemini 批量解析失败：未获取到有效返回")
+
+        def _translate_batch_with_split(batch_meta: List[Tuple[int, dict, str]]) -> List[str]:
+            if not batch_meta:
+                return []
+            texts = [x[2] for x in batch_meta]
+            try:
+                return _call_gemini_batch(texts)
+            except RuntimeError:
+                if len(batch_meta) == 1:
+                    return [_single_translate(batch_meta[0][2])]
+                mid = len(batch_meta) // 2
+                left = _translate_batch_with_split(batch_meta[:mid])
+                right = _translate_batch_with_split(batch_meta[mid:])
+                return left + right
+
+        pos = 0
+        batch_no = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta: List[Tuple[int, dict, str]] = []
+            chars = 0
+            while pos < len(pending) and len(batch_meta) < batch_max_items:
+                m = pending[pos]
+                t = m[2]
+                if batch_meta and chars + len(t) > batch_max_chars:
+                    break
+                batch_meta.append(m)
+                chars += len(t)
+                pos += 1
+
+            batch_no += 1
+            if status_cb:
+                status_cb(f"第 {batch_no} 批等待 Gemini 返回中…")
+            translated_items = _translate_batch_with_split(batch_meta)
+            for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
+                out[idx - 1] = {**seg, "text": translated or src_text}
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+
+        return [x if x is not None else segments[i] for i, x in enumerate(out)]
+
     out = []
     for idx, seg in enumerate(segments, 1):
         if cancel_event and cancel_event.is_set():
@@ -1220,6 +1486,8 @@ def translate_segments(
                 )
                 translated = translator.translate(text)
             elif api_name == "openai":
+                translated = text
+            elif api_name == "gemini":
                 translated = text
             else:
                 translated = text
@@ -1267,6 +1535,12 @@ async def list_openai_models():
     return {"models": [{"id": i, "name": n} for i, n in OPENAI_TRANSLATE_MODELS]}
 
 
+@app.get("/api/gemini_models")
+async def list_gemini_models():
+    """列出可选的 Gemini 翻译模型"""
+    return {"models": [{"id": i, "name": n} for i, n in GEMINI_TRANSLATE_MODELS]}
+
+
 @app.get("/api/ffmpeg/status")
 async def ffmpeg_status():
     """检测 ffmpeg 是否可用，以及来源（系统 / 应用内）。"""
@@ -1298,12 +1572,14 @@ async def transcribe_video(
     openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
+    gemini_api_key: str = Form(""),
+    gemini_model: str = Form(""),
     translation_rules: str = Form(""),
 ):
     """
     上传视频/音频，使用 Whisper 转写，可选翻译成另一语言，返回 SRT 文件。
     language: 识别语言；translate_to: 翻译目标语言（none 表示不翻译）；
-    translation_api: 翻译引擎（none / google / deepl / openai）。
+    translation_api: 翻译引擎（none / google / deepl / openai / gemini）。
     """
     ext = get_extension(file.filename or "")
     if ext not in ALLOWED_EXTENSIONS:
@@ -1331,7 +1607,7 @@ async def transcribe_video(
         input_path = tmp.name
 
     base_name = Path(file.filename or "video").stem
-    out_suffix = _translated_suffix(translate_to, translation_api, openai_model) if (translate_to and translate_to != "none") else ""
+    out_suffix = _translated_suffix(translate_to, translation_api, openai_model, gemini_model) if (translate_to and translate_to != "none") else ""
     filename = f"{base_name}{out_suffix}.srt"
     filename_original = f"{base_name}.srt" if (translate_to and translate_to != "none") else None
     job_id = str(uuid.uuid4())
@@ -1351,6 +1627,8 @@ async def transcribe_video(
             openai_base_url,
             deepl_api_key,
             openai_model,
+            gemini_api_key,
+            gemini_model,
             translation_rules,
             base_name,
         ),
@@ -1370,6 +1648,8 @@ async def translate_only(
     openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
+    gemini_api_key: str = Form(""),
+    gemini_model: str = Form(""),
     translation_rules: str = Form(""),
 ):
     """
@@ -1389,7 +1669,7 @@ async def translate_only(
         srt_path = tmp.name
 
     base_name = Path(file.filename or "subtitle").stem
-    out_suffix = _translated_suffix(translate_to, translation_api, openai_model)
+    out_suffix = _translated_suffix(translate_to, translation_api, openai_model, gemini_model)
     filename = f"{base_name}{out_suffix}.srt"
     job_id = str(uuid.uuid4())
     _init_job(job_id, filename)
@@ -1405,6 +1685,8 @@ async def translate_only(
             openai_base_url,
             deepl_api_key,
             openai_model,
+            gemini_api_key,
+            gemini_model,
             translation_rules,
             base_name,
         ),
