@@ -17,6 +17,7 @@ import zipfile
 import json
 import logging
 import urllib.request
+import urllib.error
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List, Tuple
@@ -840,6 +841,7 @@ def _process_job(
     openai_model: str,
     openai_reasoning_effort: str,
     gemini_api_key: str,
+    gemini_base_url: str,
     gemini_model: str,
     gemini_thinking_level: str,
     moonshot_api_key: str,
@@ -979,6 +981,7 @@ def _process_job(
                 openai_model=openai_model or None,
                 openai_reasoning_effort=openai_reasoning_effort or None,
                 gemini_api_key=gemini_api_key or None,
+                gemini_base_url=gemini_base_url or None,
                 gemini_model=gemini_model or None,
                 gemini_thinking_level=gemini_thinking_level or None,
                 moonshot_api_key=moonshot_api_key or None,
@@ -1020,6 +1023,7 @@ def _process_translate_only_job(
     openai_model: str,
     openai_reasoning_effort: str,
     gemini_api_key: str,
+    gemini_base_url: str,
     gemini_model: str,
     gemini_thinking_level: str,
     moonshot_api_key: str,
@@ -1063,6 +1067,7 @@ def _process_translate_only_job(
             openai_model=openai_model or None,
             openai_reasoning_effort=openai_reasoning_effort or None,
             gemini_api_key=gemini_api_key or None,
+            gemini_base_url=gemini_base_url or None,
             gemini_model=gemini_model or None,
             gemini_thinking_level=gemini_thinking_level or None,
             moonshot_api_key=moonshot_api_key or None,
@@ -1156,6 +1161,7 @@ def translate_segments(
     openai_model: str | None = None,
     openai_reasoning_effort: str | None = None,
     gemini_api_key: str | None = None,
+    gemini_base_url: str | None = None,
     gemini_model: str | None = None,
     gemini_thinking_level: str | None = None,
     moonshot_api_key: str | None = None,
@@ -1723,16 +1729,18 @@ def translate_segments(
 
     # Gemini: 使用单客户端 + 批量请求（规则与 OpenAI 非 gpt-5 对齐）
     if api_name == "gemini":
-        if genai is None:
-            raise HTTPException(
-                status_code=500,
-                detail="翻译失败（gemini）: 未安装 google-genai，或当前 Python 版本不兼容（Gemini 需 Python 3.9+）。请先 pip install -r requirements.txt。",
-            )
         key = (gemini_api_key or "").strip() or os.environ.get("GEMINI_API_KEY")
         if not key:
             raise HTTPException(
                 status_code=500,
                 detail="翻译失败（gemini）: 请填写 Gemini API Key，或在服务端设置 GEMINI_API_KEY",
+            )
+        relay_base_url = (gemini_base_url or "").strip() or (os.environ.get("GEMINI_BASE_URL") or "").strip()
+        use_relay = bool(relay_base_url)
+        if (not use_relay) and genai is None:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（gemini）: 未安装 google-genai，或当前 Python 版本不兼容（Gemini 需 Python 3.9+）。请先 pip install -r requirements.txt。",
             )
         model = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
         thinking_level = _normalize_gemini_thinking_level(gemini_thinking_level)
@@ -1740,7 +1748,16 @@ def translate_segments(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
         rules = (translation_rules or "").strip()
-        client = genai.Client(api_key=key)
+        client = genai.Client(api_key=key) if not use_relay else None
+        if use_relay:
+            _log_api_event(
+                "gemini_relay_mode",
+                model=model,
+                relay_base_url=relay_base_url,
+                thinking_level=(thinking_level or ""),
+            )
+            if thinking_level and status_cb:
+                status_cb("Gemini Relay 模式暂不传递 Thinking Level 参数")
 
         out: List[Optional[dict]] = [None] * total
         pending: List[Tuple[int, dict, str]] = []
@@ -1807,6 +1824,16 @@ def translate_segments(
             )
 
         def _extract_gemini_text(resp: Any) -> str:
+            if isinstance(resp, dict):
+                chunks: List[str] = []
+                for cand in resp.get("candidates", []) or []:
+                    content = cand.get("content", {}) if isinstance(cand, dict) else {}
+                    for part in (content.get("parts", []) if isinstance(content, dict) else []):
+                        if isinstance(part, dict):
+                            ptxt = part.get("text")
+                            if ptxt:
+                                chunks.append(str(ptxt))
+                return "\n".join(chunks).strip()
             text = getattr(resp, "text", None)
             if text:
                 return str(text)
@@ -1824,6 +1851,71 @@ def translate_segments(
                 return "\n".join(chunks).strip()
             except Exception:
                 return ""
+
+        def _relay_generate_content(prompt: str, *, max_output_tokens: int, json_mode: bool) -> str:
+            base = relay_base_url.rstrip("/")
+            url = f"{base}/v1beta/models/{quote(model, safe='-._~')}:{'generateContent'}"
+            generation_cfg: Dict[str, Any] = {
+                "temperature": 0,
+                "maxOutputTokens": max_output_tokens,
+            }
+            if json_mode:
+                generation_cfg["responseMimeType"] = "application/json"
+            payload: Dict[str, Any] = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": generation_cfg,
+            }
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "x-goog-api-key": key,
+                    "Content-Type": "application/json",
+                    "User-Agent": "auto_subbed/1.0",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                obj = json.loads(body) if body else {}
+                text = _extract_gemini_text(obj)
+                if text:
+                    return text
+                raise RuntimeError(f"Gemini Relay 返回内容为空：{_short_error(body)}")
+            except urllib.error.HTTPError as e:
+                err_body = ""
+                try:
+                    err_body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    err_body = ""
+                err_text = _short_error(f"HTTP {e.code} {err_body}")
+                err_lc = err_text.lower()
+                if e.code in (401, 403) or _is_auth_error(err_lc):
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Gemini Relay 鉴权失败：请检查中转站 key、权限或账号状态。",
+                    ) from e
+                if e.code == 429 or "rate limit" in err_lc or "too many requests" in err_lc:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Gemini Relay 请求过于频繁（限流）。请稍后重试。",
+                    ) from e
+                if e.code == 402 or "quota" in err_lc or "insufficient" in err_lc:
+                    raise HTTPException(
+                        status_code=402,
+                        detail="Gemini Relay 额度不足或配额受限，请检查中转站账户配额。",
+                    ) from e
+                if _is_model_error(err_lc):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Gemini 模型不可用：{model}。请确认中转站支持该模型。",
+                    ) from e
+                raise RuntimeError(f"Gemini Relay 请求失败：{err_text}") from e
+            except urllib.error.URLError as e:
+                raise RuntimeError(f"Gemini Relay 网络请求失败：{_short_error(e)}") from e
 
         def _parse_gemini_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -1866,6 +1958,9 @@ def translate_segments(
                 )
             for attempt in range(2):
                 try:
+                    if use_relay:
+                        raw = _relay_generate_content(single_prompt, max_output_tokens=2048, json_mode=False)
+                        return raw.strip() or src_text
                     config_one: Dict[str, Any] = {"temperature": 0, "max_output_tokens": 2048}
                     if thinking_level:
                         config_one["thinking_config"] = {"thinking_level": thinking_level}
@@ -1900,6 +1995,8 @@ def translate_segments(
                 model=model,
                 batch_items=expected_len,
                 batch_chars=sum(len(x) for x in batch_texts),
+                via_relay=use_relay,
+                relay_base_url=relay_base_url if use_relay else "",
             )
             schema = {
                 "type": "object",
@@ -1933,31 +2030,35 @@ def translate_segments(
 
             for attempt in range(2):
                 try:
-                    config_base: Dict[str, Any] = {
-                        "temperature": 0,
-                        "max_output_tokens": 8192,
-                        "response_mime_type": "application/json",
-                    }
-                    if thinking_level:
-                        config_base["thinking_config"] = {"thinking_level": thinking_level}
-                    try:
-                        resp = client.models.generate_content(
-                            model=model,
-                            contents=prompt,
-                            config={**config_base, "response_json_schema": schema},
-                        )
-                    except Exception:
-                        resp = client.models.generate_content(
-                            model=model,
-                            contents=prompt,
-                            config=config_base,
-                        )
-                    raw = _extract_gemini_text(resp)
+                    if use_relay:
+                        raw = _relay_generate_content(prompt, max_output_tokens=8192, json_mode=True)
+                    else:
+                        config_base: Dict[str, Any] = {
+                            "temperature": 0,
+                            "max_output_tokens": 8192,
+                            "response_mime_type": "application/json",
+                        }
+                        if thinking_level:
+                            config_base["thinking_config"] = {"thinking_level": thinking_level}
+                        try:
+                            resp = client.models.generate_content(
+                                model=model,
+                                contents=prompt,
+                                config={**config_base, "response_json_schema": schema},
+                            )
+                        except Exception:
+                            resp = client.models.generate_content(
+                                model=model,
+                                contents=prompt,
+                                config=config_base,
+                            )
+                        raw = _extract_gemini_text(resp)
                     parsed = _parse_gemini_batch_json(raw, expected_len)
                     _log_api_event(
                         "gemini_batch_ok",
                         model=model,
                         batch_items=expected_len,
+                        via_relay=use_relay,
                     )
                     return parsed
                 except Exception as e:
@@ -1969,6 +2070,7 @@ def translate_segments(
                         batch_items=expected_len,
                         attempt=attempt + 1,
                         error=_short_error(err_msg),
+                        via_relay=use_relay,
                     )
                     if "insufficient_quota" in err_lc or "quota" in err_lc:
                         raise HTTPException(
@@ -2022,6 +2124,7 @@ def translate_segments(
                     batch_items=len(batch_meta),
                     reason=err_text,
                     suspected_size=is_size_error,
+                    via_relay=use_relay,
                 )
                 left = _translate_batch_with_split(batch_meta[:mid])
                 right = _translate_batch_with_split(batch_meta[mid:])
@@ -2201,6 +2304,7 @@ async def transcribe_video(
     openai_model: str = Form(""),
     openai_reasoning_effort: str = Form(""),
     gemini_api_key: str = Form(""),
+    gemini_base_url: str = Form(""),
     gemini_model: str = Form(""),
     gemini_thinking_level: str = Form(""),
     moonshot_api_key: str = Form(""),
@@ -2268,6 +2372,7 @@ async def transcribe_video(
         translate_to=translate_to,
         openai_model=openai_model,
         openai_reasoning_effort=openai_reasoning_effort,
+        gemini_base_url=gemini_base_url,
         gemini_model=gemini_model,
         gemini_thinking_level=gemini_thinking_level,
         moonshot_model=moonshot_model,
@@ -2295,6 +2400,7 @@ async def transcribe_video(
             openai_model,
             openai_reasoning_effort,
             gemini_api_key,
+            gemini_base_url,
             gemini_model,
             gemini_thinking_level,
             moonshot_api_key,
@@ -2322,6 +2428,7 @@ async def translate_only(
     openai_model: str = Form(""),
     openai_reasoning_effort: str = Form(""),
     gemini_api_key: str = Form(""),
+    gemini_base_url: str = Form(""),
     gemini_model: str = Form(""),
     gemini_thinking_level: str = Form(""),
     moonshot_api_key: str = Form(""),
@@ -2367,6 +2474,7 @@ async def translate_only(
         translate_to=translate_to,
         openai_model=openai_model,
         openai_reasoning_effort=openai_reasoning_effort,
+        gemini_base_url=gemini_base_url,
         gemini_model=gemini_model,
         gemini_thinking_level=gemini_thinking_level,
         moonshot_model=moonshot_model,
@@ -2391,6 +2499,7 @@ async def translate_only(
             openai_model,
             openai_reasoning_effort,
             gemini_api_key,
+            gemini_base_url,
             gemini_model,
             gemini_thinking_level,
             moonshot_api_key,

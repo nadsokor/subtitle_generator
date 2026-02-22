@@ -15,6 +15,7 @@
   - **OpenAI / Gemini / Moonshot** 支持选择模型及「自定义」输入模型名
   - **OpenAI Reasoning Effort**：可选配置 `minimal / low / medium / high`
   - **Gemini Thinking Level**：可选配置 `MINIMAL / LOW / MEDIUM / HIGH`
+  - **Gemini Base URL（可选）**：支持接入兼容 Gemini 原生 `v1beta` 路径的中转站（如 `/v1beta/models/{model}:generateContent`）
   - **批量翻译**：Google / DeepL / OpenAI / Gemini / Moonshot 会自动分批请求，减少请求次数并提升效率
   - **每批条数可配置**：可在页面中自定义「每批条数」（留空用默认），按所选翻译 API 生效
   - **多文件并行翻译**：在 OpenAI / Gemini 下可并行处理多个文件，默认并行数为 3（可调整）
@@ -96,6 +97,8 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 - **DeepL**：在 [DeepL 开发者](https://www.deepl.com/pro-api) 获取 API Key，在页面「翻译」→ 选 DeepL 后出现的输入框中填写，或设置环境变量 `DEEPL_API_KEY` / `DEEPL_AUTH_KEY`
 - **OpenAI**：在 [OpenAI API](https://platform.openai.com/api-keys) 创建 Key，在页面填写或设置 `OPENAI_API_KEY`；可选环境变量 `OPENAI_TRANSLATE_MODEL` 指定默认模型
 - **Gemini**：在 [Gemini API](https://ai.google.dev/gemini-api/docs/api-key) 创建 Key，在页面填写或设置 `GEMINI_API_KEY`；可选环境变量 `GEMINI_TRANSLATE_MODEL` 指定默认模型
+  - 若通过中转站访问 Gemini，可在页面填写 `Gemini Base URL`，或设置环境变量 `GEMINI_BASE_URL`（示例：`https://your-relay.example.com`）
+  - 中转站需兼容 Gemini 原生接口路径 `/v1beta/models/{model}:generateContent`，并支持 `Authorization: Bearer <token>` 认证
 - **Moonshot**：在 [Moonshot 平台](https://platform.moonshot.cn/docs/overview) 获取 API Key，在页面填写或设置 `MOONSHOT_API_KEY`；可选 `MOONSHOT_BASE_URL`（默认 `https://api.moonshot.cn/v1`）与 `MOONSHOT_TRANSLATE_MODEL`（默认 `kimi-k2-turbo-preview`，`kimi-k2.5` 会自动适配 `temperature=1`）
 
 ## 项目结构

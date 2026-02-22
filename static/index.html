@@ -510,6 +510,10 @@
           <input type="password" id="geminiApiKey" placeholder="AIza..." autocomplete="off" />
         </div>
         <div class="field">
+          <label for="geminiBaseUrl">Gemini Base URL（可选，中转站）</label>
+          <input type="text" id="geminiBaseUrl" placeholder="例如：https://your-relay.example.com" autocomplete="off" />
+        </div>
+        <div class="field">
           <label for="geminiModel">Gemini 翻译模型</label>
           <select id="geminiModel">
             <option value="custom">自定义…</option>
@@ -600,7 +604,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.11";
+    const APP_VERSION = "1.12";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -622,6 +626,7 @@
     const geminiModelCustom = document.getElementById("geminiModelCustom");
     const geminiModelCustomWrap = document.getElementById("geminiModelCustomWrap");
     const geminiThinkingLevel = document.getElementById("geminiThinkingLevel");
+    const geminiBaseUrl = document.getElementById("geminiBaseUrl");
     const moonshotApiKey = document.getElementById("moonshotApiKey");
     const moonshotBaseUrl = document.getElementById("moonshotBaseUrl");
     const moonshotModel = document.getElementById("moonshotModel");
@@ -778,6 +783,7 @@
         if (data.openai_model_custom) openaiModelCustom.value = data.openai_model_custom;
         if (data.openai_reasoning_effort != null) openaiReasoningEffort.value = data.openai_reasoning_effort;
         if (data.gemini_api_key) geminiApiKey.value = data.gemini_api_key;
+        if (data.gemini_base_url) geminiBaseUrl.value = data.gemini_base_url;
         if (data.gemini_model) geminiModel.value = data.gemini_model;
         if (data.gemini_model_custom) geminiModelCustom.value = data.gemini_model_custom;
         if (data.gemini_thinking_level) geminiThinkingLevel.value = data.gemini_thinking_level;
@@ -830,6 +836,7 @@
           openai_model_custom: openaiModelCustom.value.trim(),
           openai_reasoning_effort: openaiReasoningEffort.value,
           gemini_api_key: geminiApiKey.value.trim(),
+          gemini_base_url: geminiBaseUrl.value.trim(),
           gemini_model: geminiModel.value,
           gemini_model_custom: geminiModelCustom.value.trim(),
           gemini_thinking_level: geminiThinkingLevel.value.trim(),
@@ -897,6 +904,8 @@
     openaiModelCustom.addEventListener("blur", saveApiConfig);
     geminiApiKey.addEventListener("change", saveApiConfig);
     geminiApiKey.addEventListener("blur", saveApiConfig);
+    geminiBaseUrl.addEventListener("change", saveApiConfig);
+    geminiBaseUrl.addEventListener("blur", saveApiConfig);
     geminiModelCustom.addEventListener("change", saveApiConfig);
     geminiModelCustom.addEventListener("blur", saveApiConfig);
     geminiThinkingLevel.addEventListener("change", saveApiConfig);
@@ -1111,6 +1120,7 @@
       if (openaiBaseUrl.value.trim()) form.append("openai_base_url", openaiBaseUrl.value.trim());
       if (openaiReasoningEffort.value) form.append("openai_reasoning_effort", openaiReasoningEffort.value);
       if (geminiApiKey.value.trim()) form.append("gemini_api_key", geminiApiKey.value.trim());
+      if (geminiBaseUrl.value.trim()) form.append("gemini_base_url", geminiBaseUrl.value.trim());
       if (geminiThinkingLevel.value.trim()) form.append("gemini_thinking_level", geminiThinkingLevel.value.trim());
       if (moonshotApiKey.value.trim()) form.append("moonshot_api_key", moonshotApiKey.value.trim());
       if (moonshotBaseUrl.value.trim()) form.append("moonshot_base_url", moonshotBaseUrl.value.trim());
