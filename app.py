@@ -1227,7 +1227,7 @@ def translate_segments(
 
         return [x if x is not None else segments[i] for i, x in enumerate(out)]
 
-    # Gemini: 使用单客户端 + 批量请求，减少请求次数提升速度
+    # Gemini: 优先整文件单请求，失败后自动拆分兜底
     if api_name == "gemini":
         if genai is None:
             raise HTTPException(
@@ -1241,7 +1241,6 @@ def translate_segments(
                 detail="翻译失败（gemini）: 请填写 Gemini API Key，或在服务端设置 GEMINI_API_KEY",
             )
         model = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
-        model_lc = model.lower()
         lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
@@ -1263,8 +1262,43 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        batch_max_items = 8 if "pro" in model_lc else 16
-        batch_max_chars = 3200 if "pro" in model_lc else 6400
+        def _to_int_or_none(value: Any) -> Optional[int]:
+            try:
+                n = int(value)
+                return n if n > 0 else None
+            except Exception:
+                return None
+
+        def _resolve_gemini_output_limit() -> int:
+            # 优先使用模型声明的输出上限；拿不到时使用保守高值。
+            default_limit = 65536
+            try:
+                model_meta = client.models.get(model=model)
+            except Exception:
+                return default_limit
+            output_limit = _to_int_or_none(getattr(model_meta, "output_token_limit", None))
+            if output_limit is None:
+                output_limit = _to_int_or_none(getattr(model_meta, "outputTokenLimit", None))
+            if output_limit is None:
+                dump: Dict[str, Any] = {}
+                try:
+                    if hasattr(model_meta, "model_dump"):
+                        dump = model_meta.model_dump()
+                    elif hasattr(model_meta, "to_dict"):
+                        dump = model_meta.to_dict()
+                    elif isinstance(model_meta, dict):
+                        dump = model_meta
+                except Exception:
+                    dump = {}
+                output_limit = _to_int_or_none(
+                    dump.get("output_token_limit")
+                    or dump.get("outputTokenLimit")
+                )
+            if output_limit is None:
+                return default_limit
+            return max(1024, min(output_limit, 65536))
+
+        gemini_max_output_tokens = _resolve_gemini_output_limit()
 
         def _extract_gemini_text(resp: Any) -> str:
             text = getattr(resp, "text", None)
@@ -1386,7 +1420,7 @@ def translate_segments(
                 try:
                     config_base: Dict[str, Any] = {
                         "temperature": 0,
-                        "max_output_tokens": 8192,
+                        "max_output_tokens": gemini_max_output_tokens,
                         "response_mime_type": "application/json",
                     }
                     try:
@@ -1435,31 +1469,19 @@ def translate_segments(
                 if len(batch_meta) == 1:
                     return [_single_translate(batch_meta[0][2])]
                 mid = len(batch_meta) // 2
+                if status_cb:
+                    status_cb(
+                        f"单请求规模过大，自动拆分为 {mid} + {len(batch_meta) - mid} 条重试…"
+                    )
                 left = _translate_batch_with_split(batch_meta[:mid])
                 right = _translate_batch_with_split(batch_meta[mid:])
                 return left + right
 
-        pos = 0
-        batch_no = 0
-        while pos < len(pending):
-            if cancel_event and cancel_event.is_set():
-                raise JobCanceled("任务已取消")
-            batch_meta: List[Tuple[int, dict, str]] = []
-            chars = 0
-            while pos < len(pending) and len(batch_meta) < batch_max_items:
-                m = pending[pos]
-                t = m[2]
-                if batch_meta and chars + len(t) > batch_max_chars:
-                    break
-                batch_meta.append(m)
-                chars += len(t)
-                pos += 1
-
-            batch_no += 1
+        if pending:
             if status_cb:
-                status_cb(f"第 {batch_no} 批等待 Gemini 返回中…")
-            translated_items = _translate_batch_with_split(batch_meta)
-            for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
+                status_cb(f"整文件单请求翻译中（{len(pending)} 条）…")
+            translated_items = _translate_batch_with_split(pending)
+            for (idx, seg, src_text), translated in zip(pending, translated_items):
                 out[idx - 1] = {**seg, "text": translated or src_text}
                 done += 1
                 if progress_cb:
