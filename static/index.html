@@ -417,6 +417,10 @@
           <label for="geminiModelCustom">自定义模型名</label>
           <input type="text" id="geminiModelCustom" placeholder="例如：gemini-2.5-flash-lite" autocomplete="off" />
         </div>
+        <div class="field">
+          <label for="geminiThinkingLevel">Gemini Thinking Level（可选）</label>
+          <input type="text" id="geminiThinkingLevel" placeholder="例如：MINIMAL / LOW / MEDIUM / HIGH，留空默认" autocomplete="off" />
+        </div>
       </div>
       <div id="apiConfigDeepl" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
@@ -427,7 +431,7 @@
       <div id="apiConfigBatch" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
           <label for="translationBatchSize">每批条数（可选）</label>
-          <input type="number" id="translationBatchSize" min="1" step="1" placeholder="留空则使用默认值" />
+          <input type="text" id="translationBatchSize" inputmode="numeric" pattern="[0-9]*" placeholder="留空则使用默认值" autocomplete="off" />
           <div class="hint" style="margin-top: 0.35rem;">Google / DeepL / OpenAI / Gemini 翻译时生效</div>
         </div>
       </div>
@@ -456,7 +460,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.7";
+    const APP_VERSION = "1.8";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -476,6 +480,7 @@
     const geminiModel = document.getElementById("geminiModel");
     const geminiModelCustom = document.getElementById("geminiModelCustom");
     const geminiModelCustomWrap = document.getElementById("geminiModelCustomWrap");
+    const geminiThinkingLevel = document.getElementById("geminiThinkingLevel");
     const deeplApiKey = document.getElementById("deeplApiKey");
     const apiConfigOpenai = document.getElementById("apiConfigOpenai");
     const apiConfigGemini = document.getElementById("apiConfigGemini");
@@ -602,6 +607,7 @@
         if (data.gemini_api_key) geminiApiKey.value = data.gemini_api_key;
         if (data.gemini_model) geminiModel.value = data.gemini_model;
         if (data.gemini_model_custom) geminiModelCustom.value = data.gemini_model_custom;
+        if (data.gemini_thinking_level) geminiThinkingLevel.value = data.gemini_thinking_level;
         if (data.deepl_api_key) deeplApiKey.value = data.deepl_api_key;
         if (data.translation_batch_size) translationBatchSize.value = data.translation_batch_size;
         if (data.translation_rules != null) translationRules.value = data.translation_rules;
@@ -646,6 +652,7 @@
           gemini_api_key: geminiApiKey.value.trim(),
           gemini_model: geminiModel.value,
           gemini_model_custom: geminiModelCustom.value.trim(),
+          gemini_thinking_level: geminiThinkingLevel.value.trim(),
           deepl_api_key: deeplApiKey.value.trim(),
           translation_batch_size: translationBatchSize.value.trim(),
           translation_rules: translationRules.value,
@@ -699,6 +706,8 @@
     geminiApiKey.addEventListener("blur", saveApiConfig);
     geminiModelCustom.addEventListener("change", saveApiConfig);
     geminiModelCustom.addEventListener("blur", saveApiConfig);
+    geminiThinkingLevel.addEventListener("change", saveApiConfig);
+    geminiThinkingLevel.addEventListener("blur", saveApiConfig);
     deeplApiKey.addEventListener("change", saveApiConfig);
     deeplApiKey.addEventListener("blur", saveApiConfig);
     translationBatchSize.addEventListener("change", saveApiConfig);
@@ -799,6 +808,7 @@
       if (openaiApiKey.value.trim()) form.append("openai_api_key", openaiApiKey.value.trim());
       if (openaiBaseUrl.value.trim()) form.append("openai_base_url", openaiBaseUrl.value.trim());
       if (geminiApiKey.value.trim()) form.append("gemini_api_key", geminiApiKey.value.trim());
+      if (geminiThinkingLevel.value.trim()) form.append("gemini_thinking_level", geminiThinkingLevel.value.trim());
       if (deeplApiKey.value.trim()) form.append("deepl_api_key", deeplApiKey.value.trim());
       const selectedOpenaiModel = openaiModel.value === "custom"
         ? (openaiModelCustom.value.trim() || "gpt-4o-mini")

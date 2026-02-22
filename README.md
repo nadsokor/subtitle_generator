@@ -13,6 +13,7 @@
   - **Google 翻译**：免密钥
   - **DeepL**、**OpenAI**、**Gemini**：需在页面或环境变量中配置 API Key
   - **OpenAI / Gemini** 支持选择模型及「自定义」输入模型名
+  - **Gemini Thinking Level**：可选配置 `MINIMAL / LOW / MEDIUM / HIGH`
   - **批量翻译**：Google / DeepL / OpenAI / Gemini 会自动分批请求，减少请求次数并提升效率
   - **每批条数可配置**：可在页面中自定义「每批条数」（留空用默认），按所选翻译 API 生效
   - **翻译风格与规则**：可选填写说明（OpenAI / Gemini 生效），如语气、专有名词保留等
@@ -76,6 +77,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 5. （可选）**翻译**：
    - 在「翻译 API」中选 Google / DeepL / OpenAI / Gemini，在「翻译成」中选目标语言
    - 选 OpenAI 或 Gemini 时可在「API 配置」中填写 API Key、选择模型（含「自定义」输入模型名），以及「翻译风格与规则」
+   - 选 Gemini 时可额外设置 Thinking Level（`MINIMAL / LOW / MEDIUM / HIGH`，留空为默认）
    - 选 DeepL 时填写 DeepL API Key；配置会保存在浏览器本地，下次自动带出
    - 可在「每批条数」中设置批量请求的每批字幕条数（如 8/12/20）；不填则使用默认值
 6. 点击 **「生成字幕」**，等待任务完成（页面会显示进度条与预计剩余时间）

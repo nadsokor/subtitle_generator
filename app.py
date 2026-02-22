@@ -658,6 +658,7 @@ def _process_job(
     openai_model: str,
     gemini_api_key: str,
     gemini_model: str,
+    gemini_thinking_level: str,
     translation_rules: str,
     translation_batch_size: int,
     base_name: str = "",
@@ -792,6 +793,7 @@ def _process_job(
                 openai_model=openai_model or None,
                 gemini_api_key=gemini_api_key or None,
                 gemini_model=gemini_model or None,
+                gemini_thinking_level=gemini_thinking_level or None,
                 translation_rules=translation_rules or None,
                 translation_batch_size=translation_batch_size,
                 progress_cb=translate_progress,
@@ -828,6 +830,7 @@ def _process_translate_only_job(
     openai_model: str,
     gemini_api_key: str,
     gemini_model: str,
+    gemini_thinking_level: str,
     translation_rules: str,
     translation_batch_size: int,
     base_name: str,
@@ -866,6 +869,7 @@ def _process_translate_only_job(
             openai_model=openai_model or None,
             gemini_api_key=gemini_api_key or None,
             gemini_model=gemini_model or None,
+            gemini_thinking_level=gemini_thinking_level or None,
             translation_rules=translation_rules or None,
             translation_batch_size=translation_batch_size,
             progress_cb=translate_progress,
@@ -903,6 +907,27 @@ def _resolve_batch_size(value: Optional[int], default: int, *, min_value: int = 
     return n
 
 
+def _normalize_gemini_thinking_level(value: Optional[str]) -> Optional[str]:
+    """将 Gemini thinking level 规范化为 SDK 支持值。"""
+    raw = (value or "").strip().upper()
+    if not raw or raw in {"AUTO", "DEFAULT", "UNSPECIFIED", "THINKING_LEVEL_UNSPECIFIED"}:
+        return None
+    aliases = {
+        "MIN": "MINIMAL",
+        "NONE": "MINIMAL",
+        "OFF": "MINIMAL",
+        "DISABLED": "MINIMAL",
+    }
+    raw = aliases.get(raw, raw)
+    allowed = {"MINIMAL", "LOW", "MEDIUM", "HIGH"}
+    if raw in allowed:
+        return raw
+    raise HTTPException(
+        status_code=400,
+        detail="Gemini Thinking Level 不合法。可用值：MINIMAL / LOW / MEDIUM / HIGH（留空为默认）。",
+    )
+
+
 def translate_segments(
     segments: list,
     target_lang: str,
@@ -915,6 +940,7 @@ def translate_segments(
     openai_model: str | None = None,
     gemini_api_key: str | None = None,
     gemini_model: str | None = None,
+    gemini_thinking_level: str | None = None,
     translation_rules: str | None = None,
     translation_batch_size: int | None = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -1260,6 +1286,7 @@ def translate_segments(
                 detail="翻译失败（gemini）: 请填写 Gemini API Key，或在服务端设置 GEMINI_API_KEY",
             )
         model = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
+        thinking_level = _normalize_gemini_thinking_level(gemini_thinking_level)
         lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
@@ -1345,10 +1372,13 @@ def translate_segments(
                 )
             for attempt in range(2):
                 try:
+                    config_one: Dict[str, Any] = {"temperature": 0, "max_output_tokens": 2048}
+                    if thinking_level:
+                        config_one["thinking_config"] = {"thinking_level": thinking_level}
                     one_resp = client.models.generate_content(
                         model=model,
                         contents=single_prompt,
-                        config={"temperature": 0, "max_output_tokens": 2048},
+                        config=config_one,
                     )
                     return _extract_gemini_text(one_resp).strip() or src_text
                 except Exception as e:
@@ -1408,6 +1438,8 @@ def translate_segments(
                         "max_output_tokens": 8192,
                         "response_mime_type": "application/json",
                     }
+                    if thinking_level:
+                        config_base["thinking_config"] = {"thinking_level": thinking_level}
                     try:
                         resp = client.models.generate_content(
                             model=model,
@@ -1628,6 +1660,7 @@ async def transcribe_video(
     openai_model: str = Form(""),
     gemini_api_key: str = Form(""),
     gemini_model: str = Form(""),
+    gemini_thinking_level: str = Form(""),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
@@ -1684,6 +1717,7 @@ async def transcribe_video(
             openai_model,
             gemini_api_key,
             gemini_model,
+            gemini_thinking_level,
             translation_rules,
             translation_batch_size,
             base_name,
@@ -1706,6 +1740,7 @@ async def translate_only(
     openai_model: str = Form(""),
     gemini_api_key: str = Form(""),
     gemini_model: str = Form(""),
+    gemini_thinking_level: str = Form(""),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
@@ -1744,6 +1779,7 @@ async def translate_only(
             openai_model,
             gemini_api_key,
             gemini_model,
+            gemini_thinking_level,
             translation_rules,
             translation_batch_size,
             base_name,
