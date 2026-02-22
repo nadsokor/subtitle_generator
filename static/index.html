@@ -560,8 +560,12 @@
     const STORAGE_KEY = "auto_subbed_api_config";
     const SETTINGS_KEY = "auto_subbed_settings";
     const activeJobIds = new Set();
+    const parallelTaskStates = new Map();
     let selectedFiles = [];
     let stopQueue = false;
+    let parallelRunEnabled = false;
+    let parallelTotalFiles = 0;
+    let autoDownloadChain = Promise.resolve();
 
     function updateModeUI() {
       const onlyTranslate = workMode.value === "translate_only";
@@ -594,6 +598,9 @@
       submitBtn.disabled = true;
       cancelBtn.disabled = true;
       activeJobIds.clear();
+      parallelTaskStates.clear();
+      parallelRunEnabled = false;
+      parallelTotalFiles = 0;
     }
     async function checkFfmpegAndShowBanner() {
       try {
@@ -804,6 +811,48 @@
       downloadList.innerHTML = "";
     }
 
+    function queueAutoDownload(url, filename) {
+      autoDownloadChain = autoDownloadChain.then(async () => {
+        try {
+          await triggerDownload(url, filename);
+        } catch (_) {
+          // 自动下载可能被浏览器拦截，保留可点击链接
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      });
+      return autoDownloadChain;
+    }
+
+    function renderParallelStatus() {
+      if (!parallelRunEnabled || parallelTotalFiles <= 0) return;
+      let done = 0;
+      let fail = 0;
+      let running = 0;
+      let progressSum = 0;
+      for (let i = 1; i <= parallelTotalFiles; i++) {
+        const s = parallelTaskStates.get(i);
+        if (!s) continue;
+        const p = Number.isFinite(s.progress) ? Math.max(0, Math.min(100, s.progress)) : 0;
+        progressSum += p;
+        if (s.status === "done") done += 1;
+        else if (s.status === "fail") fail += 1;
+        else if (s.status === "running") running += 1;
+      }
+      const queued = Math.max(0, parallelTotalFiles - done - fail - running);
+      const overall = Math.round(progressSum / parallelTotalFiles);
+      showProgress(overall, null);
+      const msg = `并行执行中：运行 ${running}，排队 ${queued}，完成 ${done}，失败 ${fail}`;
+      const type = running > 0 ? "loading" : (fail > 0 ? "error" : "success");
+      showStatus(running > 0 ? `<span class="spinner"></span>${msg}` : msg, type);
+    }
+
+    function setParallelTaskState(index, patch) {
+      if (!parallelRunEnabled) return;
+      const prev = parallelTaskStates.get(index) || {};
+      parallelTaskStates.set(index, { ...prev, ...patch });
+      renderParallelStatus();
+    }
+
     async function triggerDownload(url, preferredName) {
       const dlRes = await fetch(url);
       if (!dlRes.ok) throw new Error(dlRes.statusText);
@@ -930,13 +979,23 @@
       const { job_id } = await startRes.json();
       if (!job_id) throw new Error("任务启动失败，未返回 job_id");
       activeJobIds.add(job_id);
+      const useParallelUI = parallelRunEnabled && batchMode;
+      if (useParallelUI) {
+        setParallelTaskState(queueIndex, {
+          status: "running",
+          progress: 0,
+          fileName: file.name,
+          message: "任务已启动",
+        });
+      }
 
       let originalDownloaded = false;
       let lastJobMsg = "";
       let lastJobMsgAt = Date.now();
+      const buildDownloadUrl = (fileParam) =>
+        fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
       const downloadOne = async (fileParam, defaultName) => {
-        const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
-        await triggerDownload(url, defaultName);
+        await triggerDownload(buildDownloadUrl(fileParam), defaultName);
       };
 
       try {
@@ -957,10 +1016,14 @@
                 `/api/jobs/${job_id}/download?file=original`,
                 job.filename_original
               );
-              try {
-                await downloadOne("original", job.filename_original);
-              } catch (_) {
-                // 自动下载可能被浏览器拦截，保留可点击链接
+              if (useParallelUI) {
+                queueAutoDownload(buildDownloadUrl("original"), job.filename_original);
+              } else {
+                try {
+                  await downloadOne("original", job.filename_original);
+                } catch (_) {
+                  // 自动下载可能被浏览器拦截，保留可点击链接
+                }
               }
             } else {
               await downloadOne("original", job.filename_original);
@@ -969,7 +1032,16 @@
           }
           if (job.status === "error") {
             if (originalDownloaded) {
-              showStatus(`文件 ${queueIndex}/${queueTotal}：翻译失败，但原字幕已下载`, "error");
+              const partialFailMsg = `文件 ${queueIndex}/${queueTotal}：翻译失败，但原字幕已下载`;
+              if (useParallelUI) {
+                setParallelTaskState(queueIndex, {
+                  status: "fail",
+                  progress: 100,
+                  message: partialFailMsg,
+                });
+              } else {
+                showStatus(partialFailMsg, "error");
+              }
               return { ok: false };
             }
             throw new Error(job.error || "任务失败");
@@ -985,10 +1057,14 @@
                 `/api/jobs/${job_id}/download`,
                 finalName
               );
-              try {
-                await downloadOne("translated", finalName);
-              } catch (_) {
-                // 自动下载可能被浏览器拦截，保留可点击链接
+              if (useParallelUI) {
+                queueAutoDownload(buildDownloadUrl("translated"), finalName);
+              } else {
+                try {
+                  await downloadOne("translated", finalName);
+                } catch (_) {
+                  // 自动下载可能被浏览器拦截，保留可点击链接
+                }
               }
             } else if (job.filename_original) {
               if (!originalDownloaded) {
@@ -998,8 +1074,17 @@
             } else {
               await downloadOne(null, job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
             }
-            showProgress(100, null);
-            showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
+            if (useParallelUI) {
+              setParallelTaskState(queueIndex, {
+                status: "done",
+                progress: 100,
+                fileName: file.name,
+                message: "完成",
+              });
+            } else {
+              showProgress(100, null);
+              showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
+            }
             return { ok: true };
           }
           const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
@@ -1013,8 +1098,17 @@
           if ((job.stage === "translating" || job.stage === "transcribing") && (progressVal === 0 || progressVal === null) && waitingSec >= 10) {
             msgDisplay = `${msg}（等待模型响应中 ${waitingSec}s）`;
           }
-          showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msgDisplay}`, "loading");
-          showProgress(progressVal, job.eta_seconds ?? null);
+          if (useParallelUI) {
+            setParallelTaskState(queueIndex, {
+              status: "running",
+              progress: progressVal == null ? 0 : progressVal,
+              fileName: file.name,
+              message: msgDisplay,
+            });
+          } else {
+            showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msgDisplay}`, "loading");
+            showProgress(progressVal, job.eta_seconds ?? null);
+          }
           await new Promise((r) => setTimeout(r, 1000));
         }
       } finally {
@@ -1055,12 +1149,18 @@
       cancelBtn.disabled = false;
       stopQueue = false;
       downloadList.innerHTML = "";
+      parallelTaskStates.clear();
+      parallelRunEnabled = false;
+      parallelTotalFiles = 0;
+      autoDownloadChain = Promise.resolve();
 
       let okCount = 0;
       let failCount = 0;
       try {
         const canParallel = ["openai", "gemini"].includes(translationApi.value);
         const workerCount = (batchMode && canParallel) ? Math.min(getParallelFileCount(), files.length) : 1;
+        parallelRunEnabled = workerCount > 1;
+        parallelTotalFiles = files.length;
         let nextIndex = 0;
         showStatus(
           workerCount > 1
@@ -1076,7 +1176,9 @@
             const i = nextIndex++;
             if (i >= files.length) return;
             const file = files[i];
-            fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
+            if (!parallelRunEnabled) {
+              fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
+            }
             try {
               const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length, batchMode);
               if (result.ok) okCount += 1;
@@ -1087,7 +1189,16 @@
                 return;
               }
               failCount += 1;
-              showStatus(`文件 ${i + 1}/${files.length} 失败：${msg}`, "error");
+              if (parallelRunEnabled) {
+                setParallelTaskState(i + 1, {
+                  status: "fail",
+                  progress: 100,
+                  fileName: file.name,
+                  message: msg,
+                });
+              } else {
+                showStatus(`文件 ${i + 1}/${files.length} 失败：${msg}`, "error");
+              }
             }
           }
         };
@@ -1096,8 +1207,11 @@
         await Promise.all(workers);
 
         if (stopQueue) {
+          const donePercent = files.length ? Math.round(((okCount + failCount) / files.length) * 100) : 0;
+          showProgress(donePercent, null);
           showStatus(`队列已停止：成功 ${okCount}，失败 ${failCount}`, "success");
         } else if (files.length > 1) {
+          showProgress(100, null);
           showStatus(`队列完成：成功 ${okCount}，失败 ${failCount}`, failCount ? "error" : "success");
         }
       } catch (e) {
@@ -1106,6 +1220,8 @@
         showStatus("失败：" + (e.message || String(e)), "error");
       } finally {
         activeJobIds.clear();
+        parallelRunEnabled = false;
+        parallelTotalFiles = 0;
         cancelBtn.disabled = true;
         submitBtn.disabled = false;
       }
