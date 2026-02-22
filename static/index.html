@@ -1015,6 +1015,15 @@
           showStatus("请选择翻译 API 与目标语言", "error");
           return;
         }
+      } else {
+        if (translationApi.value !== "none" && translateTo.value === "none") {
+          showStatus("已选择翻译 API，请同时选择“翻译成”目标语言", "error");
+          return;
+        }
+        if (translationApi.value === "none" && translateTo.value !== "none") {
+          showStatus("已选择“翻译成”目标语言，请同时选择翻译 API", "error");
+          return;
+        }
       }
 
       saveApiConfig();

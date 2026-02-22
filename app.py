@@ -1988,6 +1988,10 @@ async def transcribe_video(
         raise HTTPException(status_code=400, detail=f"不支持的模型: {model_name}")
     if engine not in TRANSCRIBE_ENGINES:
         raise HTTPException(status_code=400, detail=f"不支持的识别引擎: {engine}")
+    if translation_api and translation_api != "none" and (not translate_to or translate_to == "none"):
+        raise HTTPException(status_code=400, detail="已选择翻译 API，请同时选择“翻译成”目标语言")
+    if translate_to and translate_to != "none" and (not translation_api or translation_api == "none"):
+        raise HTTPException(status_code=400, detail="已选择“翻译成”目标语言，请同时选择翻译 API")
 
     available, _, path_or_error = check_ffmpeg_available()
     if not available:
