@@ -92,6 +92,7 @@ TRANSLATION_APIS = [
     ("deepl", "DeepL"),
     ("openai", "OpenAI"),
     ("gemini", "Gemini"),
+    ("moonshot", "Moonshot"),
 ]
 
 # 部分语言在翻译 API 中的目标代码（与 Whisper 不一致时）
@@ -122,6 +123,13 @@ GEMINI_TRANSLATE_MODELS = [
     ("gemini-2.5-flash", "gemini-2.5-flash（推荐）"),
     ("gemini-2.5-pro", "gemini-2.5-pro"),
     ("gemini-2.0-flash", "gemini-2.0-flash"),
+]
+
+# 前端可选的 Moonshot 翻译模型
+MOONSHOT_TRANSLATE_MODELS = [
+    ("moonshot-v1-8k", "moonshot-v1-8k"),
+    ("moonshot-v1-32k", "moonshot-v1-32k"),
+    ("moonshot-v1-128k", "moonshot-v1-128k"),
 ]
 
 app = FastAPI(title="视频自动字幕", description="本地 Whisper 多语字幕生成")
@@ -390,16 +398,25 @@ def _safe_filename_token(value: str) -> str:
     return token or "model"
 
 
-def _translated_suffix(translate_to: str, translation_api: str, openai_model: str, gemini_model: str) -> str:
+def _translated_suffix(
+    translate_to: str,
+    translation_api: str,
+    openai_model: str,
+    gemini_model: str,
+    moonshot_model: str,
+) -> str:
     parts = [translate_to]
     api_name = (translation_api or "").strip().lower()
-    if api_name and api_name not in ("none", "openai", "gemini"):
+    if api_name and api_name not in ("none", "openai", "gemini", "moonshot"):
         parts.append(_safe_filename_token(api_name))
     if api_name == "openai":
         model_name = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
         parts.append(_safe_filename_token(model_name))
     if api_name == "gemini":
         model_name = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
+        parts.append(_safe_filename_token(model_name))
+    if api_name == "moonshot":
+        model_name = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "moonshot-v1-8k")
         parts.append(_safe_filename_token(model_name))
     return "." + ".".join(parts)
 
@@ -656,9 +673,13 @@ def _process_job(
     openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
+    openai_reasoning_effort: str,
     gemini_api_key: str,
     gemini_model: str,
     gemini_thinking_level: str,
+    moonshot_api_key: str,
+    moonshot_base_url: str,
+    moonshot_model: str,
     translation_rules: str,
     translation_batch_size: int,
     base_name: str = "",
@@ -791,9 +812,13 @@ def _process_job(
                 openai_base_url=openai_base_url or None,
                 deepl_api_key=deepl_api_key or None,
                 openai_model=openai_model or None,
+                openai_reasoning_effort=openai_reasoning_effort or None,
                 gemini_api_key=gemini_api_key or None,
                 gemini_model=gemini_model or None,
                 gemini_thinking_level=gemini_thinking_level or None,
+                moonshot_api_key=moonshot_api_key or None,
+                moonshot_base_url=moonshot_base_url or None,
+                moonshot_model=moonshot_model or None,
                 translation_rules=translation_rules or None,
                 translation_batch_size=translation_batch_size,
                 progress_cb=translate_progress,
@@ -828,9 +853,13 @@ def _process_translate_only_job(
     openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
+    openai_reasoning_effort: str,
     gemini_api_key: str,
     gemini_model: str,
     gemini_thinking_level: str,
+    moonshot_api_key: str,
+    moonshot_base_url: str,
+    moonshot_model: str,
     translation_rules: str,
     translation_batch_size: int,
     base_name: str,
@@ -867,9 +896,13 @@ def _process_translate_only_job(
             openai_base_url=openai_base_url or None,
             deepl_api_key=deepl_api_key or None,
             openai_model=openai_model or None,
+            openai_reasoning_effort=openai_reasoning_effort or None,
             gemini_api_key=gemini_api_key or None,
             gemini_model=gemini_model or None,
             gemini_thinking_level=gemini_thinking_level or None,
+            moonshot_api_key=moonshot_api_key or None,
+            moonshot_base_url=moonshot_base_url or None,
+            moonshot_model=moonshot_model or None,
             translation_rules=translation_rules or None,
             translation_batch_size=translation_batch_size,
             progress_cb=translate_progress,
@@ -928,6 +961,24 @@ def _normalize_gemini_thinking_level(value: Optional[str]) -> Optional[str]:
     )
 
 
+def _normalize_openai_reasoning_effort(value: Optional[str]) -> Optional[str]:
+    """将 OpenAI reasoning effort 规范化。"""
+    raw = (value or "").strip().lower()
+    if not raw or raw in {"auto", "default", "none", "off"}:
+        return None
+    aliases = {
+        "min": "minimal",
+    }
+    raw = aliases.get(raw, raw)
+    allowed = {"minimal", "low", "medium", "high"}
+    if raw in allowed:
+        return raw
+    raise HTTPException(
+        status_code=400,
+        detail="OpenAI reasoning effort 不合法。可用值：minimal / low / medium / high（留空为默认）。",
+    )
+
+
 def translate_segments(
     segments: list,
     target_lang: str,
@@ -938,9 +989,13 @@ def translate_segments(
     openai_base_url: str | None = None,
     deepl_api_key: str | None = None,
     openai_model: str | None = None,
+    openai_reasoning_effort: str | None = None,
     gemini_api_key: str | None = None,
     gemini_model: str | None = None,
     gemini_thinking_level: str | None = None,
+    moonshot_api_key: str | None = None,
+    moonshot_base_url: str | None = None,
+    moonshot_model: str | None = None,
     translation_rules: str | None = None,
     translation_batch_size: int | None = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -949,8 +1004,8 @@ def translate_segments(
 ) -> list:
     """
     将 segments 中每条 text 翻译成目标语言，时间轴不变。
-    api_name: 'google' | 'deepl' | 'openai' | 'gemini'
-    translation_rules: 可选，自定义风格与规则（OpenAI/Gemini 支持）。
+    api_name: 'google' | 'deepl' | 'openai' | 'gemini' | 'moonshot'
+    translation_rules: 可选，自定义风格与规则（OpenAI/Gemini/Moonshot 支持）。
     """
     if not segments or api_name == "none":
         return segments
@@ -1041,6 +1096,7 @@ def translate_segments(
         model = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
         model_lc = model.lower()
         gpt5_mode = "gpt-5" in model_lc
+        reasoning_effort = _normalize_openai_reasoning_effort(openai_reasoning_effort)
         lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
@@ -1066,6 +1122,24 @@ def translate_segments(
         default_batch_items = 6 if gpt5_mode else 12
         batch_max_items = _resolve_batch_size(translation_batch_size, default_batch_items, max_value=200)
         batch_max_chars = 2500 if gpt5_mode else 5000
+
+        def _openai_chat_create(**kwargs: Any) -> Any:
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+            try:
+                return client.chat.completions.create(**kwargs)
+            except TypeError as e:
+                # 兼容较老 SDK / 不支持该参数的中转
+                if "reasoning_effort" in str(e) and "reasoning_effort" in kwargs:
+                    kwargs.pop("reasoning_effort", None)
+                    return client.chat.completions.create(**kwargs)
+                raise
+            except Exception as e:
+                # 兼容仅服务端不支持该字段的中转实现
+                if "reasoning_effort" in str(e).lower() and "reasoning_effort" in kwargs:
+                    kwargs.pop("reasoning_effort", None)
+                    return client.chat.completions.create(**kwargs)
+                raise
 
         def _parse_openai_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -1103,7 +1177,7 @@ def translate_segments(
                 )
             for attempt in range(2):
                 try:
-                    one_resp = client.chat.completions.create(
+                    one_resp = _openai_chat_create(
                         model=model,
                         messages=[
                             {"role": "system", "content": single_system},
@@ -1161,16 +1235,16 @@ def translate_segments(
                     # gpt-5 默认走非 strict，减少中转兼容问题
                     if gpt5_mode:
                         try:
-                            resp = client.chat.completions.create(
+                            resp = _openai_chat_create(
                                 **kwargs,
                                 response_format={"type": "json_object"},
                             )
                         except Exception:
-                            resp = client.chat.completions.create(**kwargs)
+                            resp = _openai_chat_create(**kwargs)
                     else:
                         # 其他模型优先 strict 结构化输出
                         try:
-                            resp = client.chat.completions.create(
+                            resp = _openai_chat_create(
                                 **kwargs,
                                 response_format={
                                     "type": "json_schema",
@@ -1195,12 +1269,12 @@ def translate_segments(
                             )
                         except Exception:
                             try:
-                                resp = client.chat.completions.create(
+                                resp = _openai_chat_create(
                                     **kwargs,
                                     response_format={"type": "json_object"},
                                 )
                             except Exception:
-                                resp = client.chat.completions.create(**kwargs)
+                                resp = _openai_chat_create(**kwargs)
 
                     finish_reason = (resp.choices[0].finish_reason or "").lower()
                     if finish_reason == "length":
@@ -1263,6 +1337,231 @@ def translate_segments(
             batch_no += 1
             if status_cb:
                 status_cb(f"第 {batch_no} 批等待返回中…")
+            translated_items = _translate_batch_with_split(batch_meta)
+            for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
+                out[idx - 1] = {**seg, "text": translated or src_text}
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+
+        return [x if x is not None else segments[i] for i, x in enumerate(out)]
+
+    # Moonshot: 使用 OpenAI 兼容接口 + 批量请求
+    if api_name == "moonshot":
+        key = (moonshot_api_key or "").strip() or os.environ.get("MOONSHOT_API_KEY")
+        if not key:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（moonshot）: 请填写 Moonshot API Key，或在服务端设置 MOONSHOT_API_KEY",
+            )
+        model = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "moonshot-v1-8k")
+        lang_name = LLM_TARGET_LANG_NAMES.get(
+            target_lang if target_lang != "zh-CN" else "zh", "English"
+        )
+        rules = (translation_rules or "").strip()
+        base_url = (moonshot_base_url or "").strip() or os.environ.get("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1")
+        client = OpenAI(api_key=key, base_url=base_url or None)
+
+        out: List[Optional[dict]] = [None] * total
+        pending: List[Tuple[int, dict, str]] = []
+        done = 0
+        for idx, seg in enumerate(segments, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                out[idx - 1] = seg
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+                continue
+            pending.append((idx, seg, text))
+
+        batch_max_items = _resolve_batch_size(translation_batch_size, 12, max_value=200)
+        batch_max_chars = 5000
+
+        def _parse_batch_json(raw_text: str, expected_len: int) -> List[str]:
+            raw = (raw_text or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+            raw = re.sub(r"\s*```$", "", raw).strip()
+            parsed: Any
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                m_obj = re.search(r"\{[\s\S]*\}", raw)
+                m_arr = re.search(r"\[[\s\S]*\]", raw)
+                if m_obj:
+                    parsed = json.loads(m_obj.group(0))
+                elif m_arr:
+                    parsed = json.loads(m_arr.group(0))
+                else:
+                    raise
+            if isinstance(parsed, dict):
+                items = parsed.get("items")
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ValueError("Moonshot 返回既不是 JSON 对象也不是数组")
+            if not isinstance(items, list) or len(items) != expected_len:
+                raise ValueError("Moonshot 返回 items 数量与请求不一致")
+            return [str(x).strip() if x is not None else "" for x in items]
+
+        def _single_translate(src_text: str) -> str:
+            single_system = f"You are a translator. Output only the translation in {lang_name}, no explanation."
+            if rules:
+                single_system = (
+                    f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
+                    f"Output only the translation in {lang_name}, no explanation."
+                )
+            for attempt in range(2):
+                try:
+                    one_resp = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": single_system},
+                            {"role": "user", "content": src_text},
+                        ],
+                        max_tokens=1024,
+                        temperature=0,
+                    )
+                    return (one_resp.choices[0].message.content or "").strip() or src_text
+                except OpenAIRateLimitError as e:
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="Moonshot 请求过于频繁（限流）。请稍后再试，或检查平台配额限制。",
+                        ) from e
+                except Exception:
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        return src_text
+            return src_text
+
+        def _call_batch(batch_texts: List[str]) -> List[str]:
+            expected_len = len(batch_texts)
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            system_content = (
+                f"You are a translator. Translate every string to {lang_name}. "
+                "Return ONLY valid JSON object with this schema: "
+                "{\"items\": [\"translated string 1\", \"translated string 2\", ...]}. "
+                "The items length and order must exactly match input. "
+                "No markdown, no explanation, no extra keys."
+            )
+            if rules:
+                system_content = (
+                    f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
+                    f"Translate every string to {lang_name}. Return ONLY valid JSON object with schema "
+                    "{\"items\": [...]}. items length and order must exactly match input. "
+                    "No markdown, no explanation, no extra keys."
+                )
+            user_content = json.dumps(batch_texts, ensure_ascii=False)
+            for attempt in range(2):
+                try:
+                    kwargs = dict(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_content},
+                            {"role": "user", "content": user_content},
+                        ],
+                        max_tokens=4096,
+                        temperature=0,
+                    )
+                    try:
+                        resp = client.chat.completions.create(
+                            **kwargs,
+                            response_format={
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": "translation_batch",
+                                    "strict": True,
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "minItems": expected_len,
+                                                "maxItems": expected_len,
+                                            }
+                                        },
+                                        "required": ["items"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                            },
+                        )
+                    except Exception:
+                        try:
+                            resp = client.chat.completions.create(
+                                **kwargs,
+                                response_format={"type": "json_object"},
+                            )
+                        except Exception:
+                            resp = client.chat.completions.create(**kwargs)
+
+                    finish_reason = (resp.choices[0].finish_reason or "").lower()
+                    if finish_reason == "length":
+                        raise ValueError("Moonshot 输出被截断（finish_reason=length）")
+                    raw = (resp.choices[0].message.content or "").strip()
+                    return _parse_batch_json(raw, expected_len)
+                except OpenAIRateLimitError as e:
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="Moonshot 请求过于频繁（限流）。请稍后再试，或检查平台配额限制。",
+                        ) from e
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "insufficient_quota" in err_msg or "quota" in err_msg:
+                        raise HTTPException(
+                            status_code=402,
+                            detail="Moonshot 报错与额度/配额有关，请检查平台账户额度与限流配置。",
+                        ) from e
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise RuntimeError(f"Moonshot 批量解析失败：{e!s}") from e
+            raise RuntimeError("Moonshot 批量解析失败：未获取到有效返回")
+
+        def _translate_batch_with_split(batch_meta: List[Tuple[int, dict, str]]) -> List[str]:
+            if not batch_meta:
+                return []
+            texts = [x[2] for x in batch_meta]
+            try:
+                return _call_batch(texts)
+            except RuntimeError:
+                if len(batch_meta) == 1:
+                    return [_single_translate(batch_meta[0][2])]
+                mid = len(batch_meta) // 2
+                left = _translate_batch_with_split(batch_meta[:mid])
+                right = _translate_batch_with_split(batch_meta[mid:])
+                return left + right
+
+        pos = 0
+        batch_no = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta: List[Tuple[int, dict, str]] = []
+            chars = 0
+            while pos < len(pending) and len(batch_meta) < batch_max_items:
+                m = pending[pos]
+                t = m[2]
+                if batch_meta and chars + len(t) > batch_max_chars:
+                    break
+                batch_meta.append(m)
+                chars += len(t)
+                pos += 1
+
+            batch_no += 1
+            if status_cb:
+                status_cb(f"第 {batch_no} 批等待 Moonshot 返回中…")
             translated_items = _translate_batch_with_split(batch_meta)
             for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
                 out[idx - 1] = {**seg, "text": translated or src_text}
@@ -1627,6 +1926,12 @@ async def list_gemini_models():
     return {"models": [{"id": i, "name": n} for i, n in GEMINI_TRANSLATE_MODELS]}
 
 
+@app.get("/api/moonshot_models")
+async def list_moonshot_models():
+    """列出可选的 Moonshot 翻译模型"""
+    return {"models": [{"id": i, "name": n} for i, n in MOONSHOT_TRANSLATE_MODELS]}
+
+
 @app.get("/api/ffmpeg/status")
 async def ffmpeg_status():
     """检测 ffmpeg 是否可用，以及来源（系统 / 应用内）。"""
@@ -1658,16 +1963,20 @@ async def transcribe_video(
     openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
+    openai_reasoning_effort: str = Form(""),
     gemini_api_key: str = Form(""),
     gemini_model: str = Form(""),
     gemini_thinking_level: str = Form(""),
+    moonshot_api_key: str = Form(""),
+    moonshot_base_url: str = Form(""),
+    moonshot_model: str = Form(""),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
     """
     上传视频/音频，使用 Whisper 转写，可选翻译成另一语言，返回 SRT 文件。
     language: 识别语言；translate_to: 翻译目标语言（none 表示不翻译）；
-    translation_api: 翻译引擎（none / google / deepl / openai / gemini）。
+    translation_api: 翻译引擎（none / google / deepl / openai / gemini / moonshot）。
     """
     ext = get_extension(file.filename or "")
     if ext not in ALLOWED_EXTENSIONS:
@@ -1695,7 +2004,13 @@ async def transcribe_video(
         input_path = tmp.name
 
     base_name = Path(file.filename or "video").stem
-    out_suffix = _translated_suffix(translate_to, translation_api, openai_model, gemini_model) if (translate_to and translate_to != "none") else ""
+    out_suffix = _translated_suffix(
+        translate_to,
+        translation_api,
+        openai_model,
+        gemini_model,
+        moonshot_model,
+    ) if (translate_to and translate_to != "none") else ""
     filename = f"{base_name}{out_suffix}.srt"
     filename_original = f"{base_name}.srt" if (translate_to and translate_to != "none") else None
     job_id = str(uuid.uuid4())
@@ -1715,9 +2030,13 @@ async def transcribe_video(
             openai_base_url,
             deepl_api_key,
             openai_model,
+            openai_reasoning_effort,
             gemini_api_key,
             gemini_model,
             gemini_thinking_level,
+            moonshot_api_key,
+            moonshot_base_url,
+            moonshot_model,
             translation_rules,
             translation_batch_size,
             base_name,
@@ -1738,9 +2057,13 @@ async def translate_only(
     openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
+    openai_reasoning_effort: str = Form(""),
     gemini_api_key: str = Form(""),
     gemini_model: str = Form(""),
     gemini_thinking_level: str = Form(""),
+    moonshot_api_key: str = Form(""),
+    moonshot_base_url: str = Form(""),
+    moonshot_model: str = Form(""),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
@@ -1761,7 +2084,13 @@ async def translate_only(
         srt_path = tmp.name
 
     base_name = Path(file.filename or "subtitle").stem
-    out_suffix = _translated_suffix(translate_to, translation_api, openai_model, gemini_model)
+    out_suffix = _translated_suffix(
+        translate_to,
+        translation_api,
+        openai_model,
+        gemini_model,
+        moonshot_model,
+    )
     filename = f"{base_name}{out_suffix}.srt"
     job_id = str(uuid.uuid4())
     _init_job(job_id, filename)
@@ -1777,9 +2106,13 @@ async def translate_only(
             openai_base_url,
             deepl_api_key,
             openai_model,
+            openai_reasoning_effort,
             gemini_api_key,
             gemini_model,
             gemini_thinking_level,
+            moonshot_api_key,
+            moonshot_base_url,
+            moonshot_model,
             translation_rules,
             translation_batch_size,
             base_name,
