@@ -17,6 +17,7 @@
   - **Gemini Thinking Level**：可选配置 `MINIMAL / LOW / MEDIUM / HIGH`
   - **批量翻译**：Google / DeepL / OpenAI / Gemini / Moonshot 会自动分批请求，减少请求次数并提升效率
   - **每批条数可配置**：可在页面中自定义「每批条数」（留空用默认），按所选翻译 API 生效
+  - **多文件并行翻译**：在 OpenAI / Gemini 下可并行处理多个文件，默认并行数为 3（可调整）
   - **翻译风格与规则**：可选填写说明（OpenAI / Gemini / Moonshot 生效），如语气、专有名词保留等
 - **ffmpeg 集成**：若未检测到系统 ffmpeg，可在页面「一键下载并安装」到应用目录，无需手动配置 PATH
 - **任务进度**：网页端展示下载模型、转写、翻译的进度条与预计剩余时间
@@ -82,6 +83,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
    - 选 Gemini 时可额外设置 Thinking Level（`MINIMAL / LOW / MEDIUM / HIGH`，留空为默认）
    - 选 DeepL 时填写 DeepL API Key；配置会保存在浏览器本地，下次自动带出
    - 可在「每批条数」中设置批量请求的每批字幕条数（如 8/12/20）；不填则使用默认值
+   - 可在「并行文件数」中设置 OpenAI / Gemini 的多文件并发数（默认 3，建议 1~5）
 6. 点击 **「生成字幕」**，等待任务完成（页面会显示进度条与预计剩余时间）
 7. 完成后会自动下载 `.srt` 文件（若启用了翻译，文件名为 `原名.语言码.srt`，如 `demo.zh.srt`）
 

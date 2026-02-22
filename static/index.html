@@ -471,6 +471,11 @@
           <input type="text" id="translationBatchSize" inputmode="numeric" pattern="[0-9]*" placeholder="留空则使用默认值" autocomplete="off" />
           <div class="hint" style="margin-top: 0.35rem;">Google / DeepL / OpenAI / Gemini / Moonshot 翻译时生效</div>
         </div>
+        <div class="field">
+          <label for="parallelFileCount">并行文件数（仅 OpenAI / Gemini，默认 3）</label>
+          <input type="text" id="parallelFileCount" inputmode="numeric" pattern="[0-9]*" value="3" autocomplete="off" />
+          <div class="hint" style="margin-top: 0.35rem;">仅多文件任务生效；建议 1~5，默认 3</div>
+        </div>
       </div>
       <div id="apiConfigRules" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
@@ -497,7 +502,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.9";
+    const APP_VERSION = "1.10";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -532,6 +537,7 @@
     const apiConfigBatch = document.getElementById("apiConfigBatch");
     const apiConfigRules = document.getElementById("apiConfigRules");
     const translationBatchSize = document.getElementById("translationBatchSize");
+    const parallelFileCount = document.getElementById("parallelFileCount");
     const translationRules = document.getElementById("translationRules");
     const submitBtn = document.getElementById("submitBtn");
     const cancelBtn = document.getElementById("cancelBtn");
@@ -553,7 +559,7 @@
 
     const STORAGE_KEY = "auto_subbed_api_config";
     const SETTINGS_KEY = "auto_subbed_settings";
-    let currentJobId = null;
+    const activeJobIds = new Set();
     let selectedFiles = [];
     let stopQueue = false;
 
@@ -587,7 +593,7 @@
       selectedFiles = [];
       submitBtn.disabled = true;
       cancelBtn.disabled = true;
-      currentJobId = null;
+      activeJobIds.clear();
     }
     async function checkFfmpegAndShowBanner() {
       try {
@@ -625,15 +631,16 @@
 
     cancelBtn.addEventListener("click", async () => {
       stopQueue = true;
-      if (!currentJobId) {
+      if (!activeJobIds.size) {
         showStatus("已停止队列", "success");
         cancelBtn.disabled = true;
         return;
       }
       cancelBtn.disabled = true;
       try {
-        await fetch(`/api/jobs/${currentJobId}/cancel`, { method: "POST" });
-        showStatus("已请求终止当前任务，并停止后续队列", "success");
+        const ids = Array.from(activeJobIds);
+        await Promise.all(ids.map((id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" }).catch(() => null)));
+        showStatus(`已请求终止 ${ids.length} 个运行中任务，并停止后续队列`, "success");
       } catch (_) {
         showStatus("终止任务请求失败", "error");
       }
@@ -674,6 +681,7 @@
         if (data.language) language.value = data.language;
         if (data.translation_api) translationApi.value = data.translation_api;
         if (data.translate_to) translateTo.value = data.translate_to;
+        if (data.parallel_file_count) parallelFileCount.value = data.parallel_file_count;
       } catch (_) {}
     }
 
@@ -686,6 +694,7 @@
           language: language.value,
           translation_api: translationApi.value,
           translate_to: translateTo.value,
+          parallel_file_count: parallelFileCount.value.trim(),
         };
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
       } catch (_) {}
@@ -755,6 +764,8 @@
     model.addEventListener("change", saveSettings);
     language.addEventListener("change", saveSettings);
     translateTo.addEventListener("change", saveSettings);
+    parallelFileCount.addEventListener("change", saveSettings);
+    parallelFileCount.addEventListener("blur", saveSettings);
 
     openaiApiKey.addEventListener("change", saveApiConfig);
     openaiApiKey.addEventListener("blur", saveApiConfig);
@@ -867,6 +878,12 @@
       hideStatus();
     }
 
+    function getParallelFileCount() {
+      const n = parseInt(parallelFileCount.value, 10);
+      if (!Number.isFinite(n) || n <= 0) return 3;
+      return Math.min(8, n);
+    }
+
     async function runSingleFileTask(file, onlyTranslate, queueIndex, queueTotal, batchMode) {
       const form = new FormData();
       form.append("file", file);
@@ -912,7 +929,7 @@
       }
       const { job_id } = await startRes.json();
       if (!job_id) throw new Error("任务启动失败，未返回 job_id");
-      currentJobId = job_id;
+      activeJobIds.add(job_id);
 
       let originalDownloaded = false;
       let lastJobMsg = "";
@@ -922,82 +939,86 @@
         await triggerDownload(url, defaultName);
       };
 
-      while (true) {
-        if (stopQueue) {
-          throw new Error("队列已停止");
-        }
-        const jobRes = await fetch(`/api/jobs/${job_id}`);
-        if (!jobRes.ok) {
-          const err = await jobRes.json().catch(() => ({ detail: jobRes.statusText }));
-          throw new Error(err.detail || jobRes.statusText);
-        }
-        const job = await jobRes.json();
-        if (!originalDownloaded && job.filename_original) {
-          if (batchMode) {
-            addDownloadLink(
-              `[${queueIndex}] 原字幕：${job.filename_original}`,
-              `/api/jobs/${job_id}/download?file=original`,
-              job.filename_original
-            );
-            try {
-              await downloadOne("original", job.filename_original);
-            } catch (_) {
-              // 自动下载可能被浏览器拦截，保留可点击链接
-            }
-          } else {
-            await downloadOne("original", job.filename_original);
+      try {
+        while (true) {
+          if (stopQueue) {
+            throw new Error("队列已停止");
           }
-          originalDownloaded = true;
-        }
-        if (job.status === "error") {
-          if (originalDownloaded) {
-            showStatus(`文件 ${queueIndex}/${queueTotal}：翻译失败，但原字幕已下载`, "error");
-            return { ok: false };
+          const jobRes = await fetch(`/api/jobs/${job_id}`);
+          if (!jobRes.ok) {
+            const err = await jobRes.json().catch(() => ({ detail: jobRes.statusText }));
+            throw new Error(err.detail || jobRes.statusText);
           }
-          throw new Error(job.error || "任务失败");
-        }
-        if (job.status === "canceled") {
-          throw new Error("任务已取消");
-        }
-        if (job.status === "done") {
-          if (batchMode) {
-            const finalName = job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt";
-            addDownloadLink(
-              `[${queueIndex}] 翻译/字幕：${finalName}`,
-              `/api/jobs/${job_id}/download`,
-              finalName
-            );
-            try {
-              await downloadOne("translated", finalName);
-            } catch (_) {
-              // 自动下载可能被浏览器拦截，保留可点击链接
-            }
-          } else if (job.filename_original) {
-            if (!originalDownloaded) {
+          const job = await jobRes.json();
+          if (!originalDownloaded && job.filename_original) {
+            if (batchMode) {
+              addDownloadLink(
+                `[${queueIndex}] 原字幕：${job.filename_original}`,
+                `/api/jobs/${job_id}/download?file=original`,
+                job.filename_original
+              );
+              try {
+                await downloadOne("original", job.filename_original);
+              } catch (_) {
+                // 自动下载可能被浏览器拦截，保留可点击链接
+              }
+            } else {
               await downloadOne("original", job.filename_original);
             }
-            await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
-          } else {
-            await downloadOne(null, job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+            originalDownloaded = true;
           }
-          showProgress(100, null);
-          showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
-          return { ok: true };
+          if (job.status === "error") {
+            if (originalDownloaded) {
+              showStatus(`文件 ${queueIndex}/${queueTotal}：翻译失败，但原字幕已下载`, "error");
+              return { ok: false };
+            }
+            throw new Error(job.error || "任务失败");
+          }
+          if (job.status === "canceled") {
+            throw new Error("任务已取消");
+          }
+          if (job.status === "done") {
+            if (batchMode) {
+              const finalName = job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt";
+              addDownloadLink(
+                `[${queueIndex}] 翻译/字幕：${finalName}`,
+                `/api/jobs/${job_id}/download`,
+                finalName
+              );
+              try {
+                await downloadOne("translated", finalName);
+              } catch (_) {
+                // 自动下载可能被浏览器拦截，保留可点击链接
+              }
+            } else if (job.filename_original) {
+              if (!originalDownloaded) {
+                await downloadOne("original", job.filename_original);
+              }
+              await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+            } else {
+              await downloadOne(null, job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+            }
+            showProgress(100, null);
+            showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
+            return { ok: true };
+          }
+          const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
+          const msg = job.message || "处理中…";
+          if (msg !== lastJobMsg) {
+            lastJobMsg = msg;
+            lastJobMsgAt = Date.now();
+          }
+          let msgDisplay = msg;
+          const waitingSec = Math.floor((Date.now() - lastJobMsgAt) / 1000);
+          if ((job.stage === "translating" || job.stage === "transcribing") && (progressVal === 0 || progressVal === null) && waitingSec >= 10) {
+            msgDisplay = `${msg}（等待模型响应中 ${waitingSec}s）`;
+          }
+          showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msgDisplay}`, "loading");
+          showProgress(progressVal, job.eta_seconds ?? null);
+          await new Promise((r) => setTimeout(r, 1000));
         }
-        const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
-        const msg = job.message || "处理中…";
-        if (msg !== lastJobMsg) {
-          lastJobMsg = msg;
-          lastJobMsgAt = Date.now();
-        }
-        let msgDisplay = msg;
-        const waitingSec = Math.floor((Date.now() - lastJobMsgAt) / 1000);
-        if ((job.stage === "translating" || job.stage === "transcribing") && (progressVal === 0 || progressVal === null) && waitingSec >= 10) {
-          msgDisplay = `${msg}（等待模型响应中 ${waitingSec}s）`;
-        }
-        showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msgDisplay}`, "loading");
-        showProgress(progressVal, job.eta_seconds ?? null);
-        await new Promise((r) => setTimeout(r, 1000));
+      } finally {
+        activeJobIds.delete(job_id);
       }
     }
 
@@ -1038,24 +1059,42 @@
       let okCount = 0;
       let failCount = 0;
       try {
-        for (let i = 0; i < files.length; i++) {
-          if (stopQueue) break;
-          const file = files[i];
-          fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
-          showStatus(`<span class="spinner"></span>队列执行中（${i + 1}/${files.length}）`, "loading");
-          showProgress(0, null);
-          try {
-            const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length, batchMode);
-            if (result.ok) okCount += 1;
-            else failCount += 1;
-          } catch (e) {
-            failCount += 1;
-            if (stopQueue || String(e.message || e).includes("取消")) {
-              break;
+        const canParallel = ["openai", "gemini"].includes(translationApi.value);
+        const workerCount = (batchMode && canParallel) ? Math.min(getParallelFileCount(), files.length) : 1;
+        let nextIndex = 0;
+        showStatus(
+          workerCount > 1
+            ? `<span class="spinner"></span>队列并行执行中（并发 ${workerCount}）`
+            : `<span class="spinner"></span>队列执行中（串行）`,
+          "loading"
+        );
+        showProgress(0, null);
+
+        const worker = async () => {
+          while (true) {
+            if (stopQueue) return;
+            const i = nextIndex++;
+            if (i >= files.length) return;
+            const file = files[i];
+            fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
+            try {
+              const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length, batchMode);
+              if (result.ok) okCount += 1;
+              else failCount += 1;
+            } catch (e) {
+              const msg = String((e && e.message) || e);
+              if (stopQueue || msg.includes("取消") || msg.includes("队列已停止")) {
+                return;
+              }
+              failCount += 1;
+              showStatus(`文件 ${i + 1}/${files.length} 失败：${msg}`, "error");
             }
-            showStatus(`文件 ${i + 1}/${files.length} 失败：${e.message || String(e)}`, "error");
           }
-        }
+        };
+
+        const workers = Array.from({ length: workerCount }, () => worker());
+        await Promise.all(workers);
+
         if (stopQueue) {
           showStatus(`队列已停止：成功 ${okCount}，失败 ${failCount}`, "success");
         } else if (files.length > 1) {
@@ -1066,7 +1105,7 @@
         progressEta.textContent = "";
         showStatus("失败：" + (e.message || String(e)), "error");
       } finally {
-        currentJobId = null;
+        activeJobIds.clear();
         cancelBtn.disabled = true;
         submitBtn.disabled = false;
       }
