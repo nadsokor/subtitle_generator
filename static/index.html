@@ -424,6 +424,13 @@
           <input type="password" id="deeplApiKey" placeholder="留空则使用环境变量" autocomplete="off" />
         </div>
       </div>
+      <div id="apiConfigBatch" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+        <div class="field">
+          <label for="translationBatchSize">每批条数（可选）</label>
+          <input type="number" id="translationBatchSize" min="1" step="1" placeholder="留空则使用默认值" />
+          <div class="hint" style="margin-top: 0.35rem;">Google / DeepL / OpenAI / Gemini 翻译时生效</div>
+        </div>
+      </div>
       <div id="apiConfigRules" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
           <label for="translationRules">翻译风格与规则（可选）</label>
@@ -449,7 +456,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.6";
+    const APP_VERSION = "1.7";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -473,7 +480,9 @@
     const apiConfigOpenai = document.getElementById("apiConfigOpenai");
     const apiConfigGemini = document.getElementById("apiConfigGemini");
     const apiConfigDeepl = document.getElementById("apiConfigDeepl");
+    const apiConfigBatch = document.getElementById("apiConfigBatch");
     const apiConfigRules = document.getElementById("apiConfigRules");
+    const translationBatchSize = document.getElementById("translationBatchSize");
     const translationRules = document.getElementById("translationRules");
     const submitBtn = document.getElementById("submitBtn");
     const cancelBtn = document.getElementById("cancelBtn");
@@ -594,6 +603,7 @@
         if (data.gemini_model) geminiModel.value = data.gemini_model;
         if (data.gemini_model_custom) geminiModelCustom.value = data.gemini_model_custom;
         if (data.deepl_api_key) deeplApiKey.value = data.deepl_api_key;
+        if (data.translation_batch_size) translationBatchSize.value = data.translation_batch_size;
         if (data.translation_rules != null) translationRules.value = data.translation_rules;
       } catch (_) {}
     }
@@ -637,6 +647,7 @@
           gemini_model: geminiModel.value,
           gemini_model_custom: geminiModelCustom.value.trim(),
           deepl_api_key: deeplApiKey.value.trim(),
+          translation_batch_size: translationBatchSize.value.trim(),
           translation_rules: translationRules.value,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -647,6 +658,7 @@
       apiConfigOpenai.style.display = api === "openai" ? "block" : "none";
       apiConfigGemini.style.display = api === "gemini" ? "block" : "none";
       apiConfigDeepl.style.display = api === "deepl" ? "block" : "none";
+      apiConfigBatch.style.display = api !== "none" ? "block" : "none";
       apiConfigRules.style.display = (api === "openai" || api === "gemini") ? "block" : "none";
     }
 
@@ -689,6 +701,8 @@
     geminiModelCustom.addEventListener("blur", saveApiConfig);
     deeplApiKey.addEventListener("change", saveApiConfig);
     deeplApiKey.addEventListener("blur", saveApiConfig);
+    translationBatchSize.addEventListener("change", saveApiConfig);
+    translationBatchSize.addEventListener("blur", saveApiConfig);
     translationRules.addEventListener("change", saveApiConfig);
     translationRules.addEventListener("blur", saveApiConfig);
 
@@ -794,6 +808,10 @@
         : geminiModel.value;
       form.append("openai_model", selectedOpenaiModel);
       form.append("gemini_model", selectedGeminiModel);
+      const batchSize = parseInt(translationBatchSize.value, 10);
+      if (Number.isFinite(batchSize) && batchSize > 0) {
+        form.append("translation_batch_size", String(batchSize));
+      }
       if (translationRules.value.trim()) form.append("translation_rules", translationRules.value.trim());
 
       const apiUrl = onlyTranslate ? "/api/translate" : "/api/transcribe";

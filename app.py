@@ -659,6 +659,7 @@ def _process_job(
     gemini_api_key: str,
     gemini_model: str,
     translation_rules: str,
+    translation_batch_size: int,
     base_name: str = "",
 ) -> None:
     work_dir = None
@@ -792,6 +793,7 @@ def _process_job(
                 gemini_api_key=gemini_api_key or None,
                 gemini_model=gemini_model or None,
                 translation_rules=translation_rules or None,
+                translation_batch_size=translation_batch_size,
                 progress_cb=translate_progress,
                 status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
                 cancel_event=cancel_event,
@@ -827,6 +829,7 @@ def _process_translate_only_job(
     gemini_api_key: str,
     gemini_model: str,
     translation_rules: str,
+    translation_batch_size: int,
     base_name: str,
 ) -> None:
     """仅翻译：读取 SRT 文件，翻译后写回 SRT，不涉及转写。"""
@@ -864,6 +867,7 @@ def _process_translate_only_job(
             gemini_api_key=gemini_api_key or None,
             gemini_model=gemini_model or None,
             translation_rules=translation_rules or None,
+            translation_batch_size=translation_batch_size,
             progress_cb=translate_progress,
             status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
             cancel_event=cancel_event,
@@ -886,6 +890,19 @@ def _translator_target_code(lang: str) -> str:
     return TRANSLATOR_TARGET_MAP.get(lang, lang)
 
 
+def _resolve_batch_size(value: Optional[int], default: int, *, min_value: int = 1, max_value: int = 200) -> int:
+    """将用户输入的每批条数解析为安全整数，<=0 时使用默认值。"""
+    try:
+        n = int(value) if value is not None else 0
+    except Exception:
+        n = 0
+    if n <= 0:
+        n = default
+    n = max(min_value, n)
+    n = min(max_value, n)
+    return n
+
+
 def translate_segments(
     segments: list,
     target_lang: str,
@@ -899,6 +916,7 @@ def translate_segments(
     gemini_api_key: str | None = None,
     gemini_model: str | None = None,
     translation_rules: str | None = None,
+    translation_batch_size: int | None = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     status_cb: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -941,8 +959,8 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        # 每批最多 50 条，且总字符数受控，提升吞吐并降低超时风险
-        batch_max_items = 50
+        # 每批条数支持用户自定义；DeepL 单批上限保持 50
+        batch_max_items = _resolve_batch_size(translation_batch_size, 50, max_value=50)
         batch_max_chars = 12000
         pos = 0
         while pos < len(pending):
@@ -1019,7 +1037,8 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        batch_max_items = 6 if gpt5_mode else 12
+        default_batch_items = 6 if gpt5_mode else 12
+        batch_max_items = _resolve_batch_size(translation_batch_size, default_batch_items, max_value=200)
         batch_max_chars = 2500 if gpt5_mode else 5000
 
         def _parse_openai_batch_json(raw_text: str, expected_len: int) -> List[str]:
@@ -1262,8 +1281,8 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        # 与 OpenAI 非 gpt-5 一致：每批最多 12 条，总字符数约 5000
-        batch_max_items = 12
+        # 每批条数支持用户自定义；默认与 OpenAI 非 gpt-5 一致
+        batch_max_items = _resolve_batch_size(translation_batch_size, 12, max_value=200)
         batch_max_chars = 5000
 
         def _extract_gemini_text(resp: Any) -> str:
@@ -1470,6 +1489,58 @@ def translate_segments(
         return [x if x is not None else segments[i] for i, x in enumerate(out)]
 
     out = []
+    if api_name == "google":
+        target = _translator_target_code(target_lang)
+        translator = GoogleTranslator(
+            source=source_lang or "auto",
+            target=target,
+        )
+        batch_max_items = _resolve_batch_size(translation_batch_size, 20, max_value=100)
+        pending: List[Tuple[int, dict, str]] = []
+        done = 0
+        for idx, seg in enumerate(segments, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                out.append(seg)
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+                continue
+            pending.append((idx, seg, text))
+
+        pos = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta = pending[pos: pos + batch_max_items]
+            batch_texts = [x[2] for x in batch_meta]
+            pos += len(batch_meta)
+            try:
+                if hasattr(translator, "translate_batch"):
+                    translated_items = translator.translate_batch(batch_texts)
+                else:
+                    translated_items = [translator.translate(t) for t in batch_texts]
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"翻译失败（{api_name}）: {e!s}",
+                ) from e
+            if not isinstance(translated_items, list):
+                translated_items = [str(translated_items)]
+            if len(translated_items) != len(batch_meta):
+                raise HTTPException(
+                    status_code=500,
+                    detail="翻译失败（google）: 返回结果数量与请求不一致",
+                )
+            for (_, seg, src_text), translated in zip(batch_meta, translated_items):
+                out.append({**seg, "text": (translated or src_text)})
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+        return out
+
     for idx, seg in enumerate(segments, 1):
         if cancel_event and cancel_event.is_set():
             raise JobCanceled("任务已取消")
@@ -1479,26 +1550,7 @@ def translate_segments(
             if progress_cb:
                 progress_cb(idx, total)
             continue
-        try:
-            if api_name == "google":
-                target = _translator_target_code(target_lang)
-                translator = GoogleTranslator(
-                    source=source_lang or "auto",
-                    target=target,
-                )
-                translated = translator.translate(text)
-            elif api_name == "openai":
-                translated = text
-            elif api_name == "gemini":
-                translated = text
-            else:
-                translated = text
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"翻译失败（{api_name}）: {e!s}",
-            )
-        out.append({**seg, "text": translated})
+        out.append({**seg, "text": text})
         if progress_cb:
             progress_cb(idx, total)
     return out
@@ -1577,6 +1629,7 @@ async def transcribe_video(
     gemini_api_key: str = Form(""),
     gemini_model: str = Form(""),
     translation_rules: str = Form(""),
+    translation_batch_size: int = Form(0),
 ):
     """
     上传视频/音频，使用 Whisper 转写，可选翻译成另一语言，返回 SRT 文件。
@@ -1632,6 +1685,7 @@ async def transcribe_video(
             gemini_api_key,
             gemini_model,
             translation_rules,
+            translation_batch_size,
             base_name,
         ),
         daemon=True,
@@ -1653,6 +1707,7 @@ async def translate_only(
     gemini_api_key: str = Form(""),
     gemini_model: str = Form(""),
     translation_rules: str = Form(""),
+    translation_batch_size: int = Form(0),
 ):
     """
     仅翻译：上传 .srt 字幕文件，翻译成目标语言后返回新 SRT。不进行语音转写。
@@ -1690,6 +1745,7 @@ async def translate_only(
             gemini_api_key,
             gemini_model,
             translation_rules,
+            translation_batch_size,
             base_name,
         ),
         daemon=True,
