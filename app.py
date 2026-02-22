@@ -1761,6 +1761,51 @@ def translate_segments(
         batch_max_items = _resolve_batch_size(translation_batch_size, 12, max_value=200)
         batch_max_chars = 5000
 
+        def _short_error(err: Any, max_len: int = 220) -> str:
+            text = str(err or "").replace("\n", " ").strip()
+            if len(text) > max_len:
+                return text[:max_len] + "...(truncated)"
+            return text
+
+        def _is_probably_batch_size_error(err_msg: str) -> bool:
+            msg = (err_msg or "").lower()
+            patterns = (
+                "request too large",
+                "payload too large",
+                "too large",
+                "context length",
+                "maximum context",
+                "token limit",
+                "too many tokens",
+                "input token",
+                "max token",
+                "exceed",
+                "413",
+            )
+            return any(p in msg for p in patterns)
+
+        def _is_auth_error(err_msg: str) -> bool:
+            msg = (err_msg or "").lower()
+            return (
+                "api key not valid" in msg
+                or "invalid api key" in msg
+                or "unauthenticated" in msg
+                or "authentication" in msg
+                or "permission_denied" in msg
+            )
+
+        def _is_model_error(err_msg: str) -> bool:
+            msg = (err_msg or "").lower()
+            return (
+                "model" in msg
+                and (
+                    "not found" in msg
+                    or "unknown model" in msg
+                    or "does not exist" in msg
+                    or "unsupported" in msg
+                )
+            )
+
         def _extract_gemini_text(resp: Any) -> str:
             text = getattr(resp, "text", None)
             if text:
@@ -1850,6 +1895,12 @@ def translate_segments(
             expected_len = len(batch_texts)
             if cancel_event and cancel_event.is_set():
                 raise JobCanceled("任务已取消")
+            _log_api_event(
+                "gemini_batch_start",
+                model=model,
+                batch_items=expected_len,
+                batch_chars=sum(len(x) for x in batch_texts),
+            )
             schema = {
                 "type": "object",
                 "properties": {
@@ -1902,10 +1953,23 @@ def translate_segments(
                             config=config_base,
                         )
                     raw = _extract_gemini_text(resp)
-                    return _parse_gemini_batch_json(raw, expected_len)
+                    parsed = _parse_gemini_batch_json(raw, expected_len)
+                    _log_api_event(
+                        "gemini_batch_ok",
+                        model=model,
+                        batch_items=expected_len,
+                    )
+                    return parsed
                 except Exception as e:
                     err_msg = str(e)
                     err_lc = err_msg.lower()
+                    _log_api_event(
+                        "gemini_batch_error",
+                        model=model,
+                        batch_items=expected_len,
+                        attempt=attempt + 1,
+                        error=_short_error(err_msg),
+                    )
                     if "insufficient_quota" in err_lc or "quota" in err_lc:
                         raise HTTPException(
                             status_code=402,
@@ -1919,10 +1983,20 @@ def translate_segments(
                                 status_code=429,
                                 detail="Gemini 请求过于频繁（限流）。请稍后再试，或在 Google AI Studio / Gemini 控制台查看配额。",
                             ) from e
+                    if _is_auth_error(err_lc):
+                        raise HTTPException(
+                            status_code=401,
+                            detail="Gemini 鉴权失败：请检查 API Key 是否有效，以及项目权限是否正确。",
+                        ) from e
+                    if _is_model_error(err_lc):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Gemini 模型不可用：{model}。请确认模型名和账号可用区域。",
+                        ) from e
                     if attempt < 1:
                         time.sleep(2 ** (attempt + 1))
                     else:
-                        raise RuntimeError(f"Gemini 批量解析失败：{e!s}") from e
+                        raise RuntimeError(f"Gemini 批量调用失败：{_short_error(e)}") from e
             raise RuntimeError("Gemini 批量解析失败：未获取到有效返回")
 
         def _translate_batch_with_split(batch_meta: List[Tuple[int, dict, str]]) -> List[str]:
@@ -1931,12 +2005,24 @@ def translate_segments(
             texts = [x[2] for x in batch_meta]
             try:
                 return _call_gemini_batch(texts)
-            except RuntimeError:
+            except RuntimeError as e:
                 if len(batch_meta) == 1:
                     return [_single_translate(batch_meta[0][2])]
                 mid = len(batch_meta) // 2
+                err_text = _short_error(e, max_len=140)
+                is_size_error = _is_probably_batch_size_error(err_text)
                 if status_cb:
-                    status_cb(f"当前批次过大，自动拆分为 {mid} + {len(batch_meta) - mid} 条重试…")
+                    if is_size_error:
+                        status_cb(f"当前批次可能过大，自动拆分为 {mid} + {len(batch_meta) - mid} 条重试…")
+                    else:
+                        status_cb(f"批量调用异常，自动拆分为 {mid} + {len(batch_meta) - mid} 条重试…")
+                _log_api_event(
+                    "gemini_batch_split",
+                    model=model,
+                    batch_items=len(batch_meta),
+                    reason=err_text,
+                    suspected_size=is_size_error,
+                )
                 left = _translate_batch_with_split(batch_meta[:mid])
                 right = _translate_batch_with_split(batch_meta[mid:])
                 return left + right
