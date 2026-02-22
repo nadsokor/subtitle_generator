@@ -127,6 +127,9 @@ GEMINI_TRANSLATE_MODELS = [
 
 # 前端可选的 Moonshot 翻译模型
 MOONSHOT_TRANSLATE_MODELS = [
+    ("kimi-k2-turbo-preview", "kimi-k2-turbo-preview（推荐）"),
+    ("kimi-k2-thinking-turbo", "kimi-k2-thinking-turbo"),
+    ("kimi-k2-0905-preview", "kimi-k2-0905-preview"),
     ("moonshot-v1-8k", "moonshot-v1-8k"),
     ("moonshot-v1-32k", "moonshot-v1-32k"),
     ("moonshot-v1-128k", "moonshot-v1-128k"),
@@ -416,7 +419,7 @@ def _translated_suffix(
         model_name = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
         parts.append(_safe_filename_token(model_name))
     if api_name == "moonshot":
-        model_name = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "moonshot-v1-8k")
+        model_name = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "kimi-k2-turbo-preview")
         parts.append(_safe_filename_token(model_name))
     return "." + ".".join(parts)
 
@@ -1354,7 +1357,7 @@ def translate_segments(
                 status_code=500,
                 detail="翻译失败（moonshot）: 请填写 Moonshot API Key，或在服务端设置 MOONSHOT_API_KEY",
             )
-        model = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "moonshot-v1-8k")
+        model = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "kimi-k2-turbo-preview")
         lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
@@ -1433,12 +1436,18 @@ def translate_segments(
                             status_code=429,
                             detail="Moonshot 请求过于频繁（限流）。请稍后再试，或检查平台配额限制。",
                         ) from e
-                except Exception:
+                except Exception as e:
                     if attempt < 1:
                         time.sleep(2 ** (attempt + 1))
                     else:
-                        return src_text
-            return src_text
+                        err = str(e).lower()
+                        if "insufficient_quota" in err or "quota" in err:
+                            raise HTTPException(
+                                status_code=402,
+                                detail="Moonshot 报错与额度/配额有关，请检查平台账户额度与限流配置。",
+                            ) from e
+                        raise RuntimeError(f"Moonshot 单条翻译失败：{e!s}") from e
+            raise RuntimeError("Moonshot 单条翻译失败：未获取到有效返回")
 
         def _call_batch(batch_texts: List[str]) -> List[str]:
             expected_len = len(batch_texts)
@@ -1471,37 +1480,13 @@ def translate_segments(
                         temperature=0,
                     )
                     try:
+                        # Moonshot 文档中 response_format 支持 json_object，未声明 json_schema
                         resp = client.chat.completions.create(
                             **kwargs,
-                            response_format={
-                                "type": "json_schema",
-                                "json_schema": {
-                                    "name": "translation_batch",
-                                    "strict": True,
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "items": {
-                                                "type": "array",
-                                                "items": {"type": "string"},
-                                                "minItems": expected_len,
-                                                "maxItems": expected_len,
-                                            }
-                                        },
-                                        "required": ["items"],
-                                        "additionalProperties": False,
-                                    },
-                                },
-                            },
+                            response_format={"type": "json_object"},
                         )
                     except Exception:
-                        try:
-                            resp = client.chat.completions.create(
-                                **kwargs,
-                                response_format={"type": "json_object"},
-                            )
-                        except Exception:
-                            resp = client.chat.completions.create(**kwargs)
+                        resp = client.chat.completions.create(**kwargs)
 
                     finish_reason = (resp.choices[0].finish_reason or "").lower()
                     if finish_reason == "length":
