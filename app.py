@@ -15,7 +15,9 @@ import time
 import uuid
 import zipfile
 import json
+import logging
 import urllib.request
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List, Tuple
 from urllib.parse import quote
@@ -27,7 +29,7 @@ from faster_whisper import WhisperModel
 from deep_translator import GoogleTranslator
 from openai import OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -146,6 +148,143 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 APP_DIR = Path(__file__).resolve().parent
 FFMPEG_APP_DIR = APP_DIR / ".ffmpeg"
 _FFMPEG_BIN_DIR: Optional[Path] = None  # 当前使用的 ffmpeg 目录（应用内或已加入 PATH 的由调用方判断）
+
+# 日志目录（按大小轮转并自动清理历史）
+LOG_DIR = APP_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+API_LOG_FILE = LOG_DIR / "api_requests.log"
+API_LOG_MAX_BYTES = _env_int("AUTO_SUBBED_API_LOG_MAX_BYTES", 10 * 1024 * 1024, min_value=1024 * 64, max_value=1024 * 1024 * 512)
+API_LOG_BACKUP_COUNT = _env_int("AUTO_SUBBED_API_LOG_BACKUP_COUNT", 10, min_value=1, max_value=200)
+_SENSITIVE_FIELD_MARKERS = ("api_key", "apikey", "authorization", "token", "password", "secret", "key")
+_MAX_LOG_VALUE_LENGTH = 280
+
+
+def _setup_api_logger() -> logging.Logger:
+    logger = logging.getLogger("auto_subbed.api")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    handler = RotatingFileHandler(
+        str(API_LOG_FILE),
+        maxBytes=API_LOG_MAX_BYTES,
+        backupCount=API_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(fmt)
+    logger.addHandler(handler)
+    return logger
+
+
+API_LOGGER = _setup_api_logger()
+
+
+def _safe_log_value(value: Any) -> Any:
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return _redact_payload({str(k): v for k, v in value.items()})
+    if isinstance(value, list):
+        return [_safe_log_value(v) for v in value]
+    text = str(value)
+    if len(text) > _MAX_LOG_VALUE_LENGTH:
+        return text[:_MAX_LOG_VALUE_LENGTH] + "...(truncated)"
+    return text
+
+
+def _mask_secret(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return "***"
+    return text[:3] + "***" + text[-3:]
+
+
+def _redact_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    redacted: Dict[str, Any] = {}
+    for key, value in payload.items():
+        key_text = str(key).lower()
+        is_sensitive = any(marker in key_text for marker in _SENSITIVE_FIELD_MARKERS) and not key_text.startswith("has_")
+        if is_sensitive:
+            redacted[str(key)] = _mask_secret(value)
+        else:
+            redacted[str(key)] = _safe_log_value(value)
+    return redacted
+
+
+def _log_api_event(event: str, **payload: Any) -> None:
+    try:
+        data = {"event": event, **payload}
+        API_LOGGER.info(json.dumps(_redact_payload(data), ensure_ascii=False, separators=(",", ":")))
+    except Exception as e:
+        API_LOGGER.error(f"写入日志失败: {e}")
+
+
+_log_api_event(
+    "log_init",
+    log_file=str(API_LOG_FILE),
+    max_bytes=API_LOG_MAX_BYTES,
+    backup_count=API_LOG_BACKUP_COUNT,
+)
+
+
+@app.middleware("http")
+async def api_request_log_middleware(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    request_id = str(uuid.uuid4())[:8]
+    start = time.perf_counter()
+    client_ip = request.client.host if request.client else ""
+    _log_api_event(
+        "request_start",
+        request_id=request_id,
+        method=request.method,
+        path=path,
+        query=dict(request.query_params),
+        client_ip=client_ip,
+        user_agent=request.headers.get("user-agent", ""),
+        content_type=request.headers.get("content-type", ""),
+        content_length=request.headers.get("content-length", ""),
+    )
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_api_event(
+            "request_error",
+            request_id=request_id,
+            method=request.method,
+            path=path,
+            duration_ms=duration_ms,
+            error=repr(e),
+        )
+        raise
+    duration_ms = int((time.perf_counter() - start) * 1000)
+    _log_api_event(
+        "request_end",
+        request_id=request_id,
+        method=request.method,
+        path=path,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+    )
+    return response
 
 
 def _platform_tag() -> str:
@@ -355,12 +494,35 @@ def _init_job(job_id: str, filename: str, filename_original: Optional[str] = Non
             "eta_seconds": None,
         }
         JOB_CANCEL[job_id] = threading.Event()
+    _log_api_event(
+        "job_init",
+        job_id=job_id,
+        filename=filename,
+        filename_original=filename_original or "",
+    )
 
 
 def _update_job(job_id: str, **kwargs: Any) -> None:
+    log_data: Optional[Dict[str, Any]] = None
     with JOB_LOCK:
         if job_id in JOB_STORE:
+            old_status = JOB_STORE[job_id].get("status")
+            old_stage = JOB_STORE[job_id].get("stage")
             JOB_STORE[job_id].update(kwargs)
+            new_status = JOB_STORE[job_id].get("status")
+            new_stage = JOB_STORE[job_id].get("stage")
+            status_changed = ("status" in kwargs and new_status != old_status)
+            stage_changed = ("stage" in kwargs and new_stage != old_stage)
+            if status_changed or stage_changed:
+                log_data = {
+                    "job_id": job_id,
+                    "status": new_status,
+                    "stage": new_stage,
+                    "message": JOB_STORE[job_id].get("message", ""),
+                    "progress": JOB_STORE[job_id].get("progress"),
+                }
+    if log_data:
+        _log_api_event("job_update", **log_data)
 
 
 def _get_job(job_id: str) -> Optional[Dict[str, Any]]:
@@ -1992,6 +2154,7 @@ async def transcribe_video(
     suffix = ext or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         content = await file.read()
+        uploaded_bytes = len(content)
         tmp.write(content)
         input_path = tmp.name
 
@@ -2007,6 +2170,28 @@ async def transcribe_video(
     filename_original = f"{base_name}.srt" if (translate_to and translate_to != "none") else None
     job_id = str(uuid.uuid4())
     _init_job(job_id, filename, filename_original=filename_original)
+    _log_api_event(
+        "transcribe_submit",
+        job_id=job_id,
+        filename=file.filename or "",
+        uploaded_bytes=uploaded_bytes,
+        engine=engine,
+        model_name=model_name,
+        language=language,
+        translation_api=translation_api,
+        translate_to=translate_to,
+        openai_model=openai_model,
+        openai_reasoning_effort=openai_reasoning_effort,
+        gemini_model=gemini_model,
+        gemini_thinking_level=gemini_thinking_level,
+        moonshot_model=moonshot_model,
+        translation_batch_size=translation_batch_size,
+        has_translation_rules=bool((translation_rules or "").strip()),
+        has_openai_api_key=bool((openai_api_key or "").strip()),
+        has_gemini_api_key=bool((gemini_api_key or "").strip()),
+        has_moonshot_api_key=bool((moonshot_api_key or "").strip()),
+        has_deepl_api_key=bool((deepl_api_key or "").strip()),
+    )
 
     thread = threading.Thread(
         target=_process_job,
@@ -2072,6 +2257,7 @@ async def translate_only(
 
     with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".srt") as tmp:
         content = await file.read()
+        uploaded_bytes = len(content)
         tmp.write(content)
         srt_path = tmp.name
 
@@ -2086,6 +2272,25 @@ async def translate_only(
     filename = f"{base_name}{out_suffix}.srt"
     job_id = str(uuid.uuid4())
     _init_job(job_id, filename)
+    _log_api_event(
+        "translate_submit",
+        job_id=job_id,
+        filename=file.filename or "",
+        uploaded_bytes=uploaded_bytes,
+        translation_api=translation_api,
+        translate_to=translate_to,
+        openai_model=openai_model,
+        openai_reasoning_effort=openai_reasoning_effort,
+        gemini_model=gemini_model,
+        gemini_thinking_level=gemini_thinking_level,
+        moonshot_model=moonshot_model,
+        translation_batch_size=translation_batch_size,
+        has_translation_rules=bool((translation_rules or "").strip()),
+        has_openai_api_key=bool((openai_api_key or "").strip()),
+        has_gemini_api_key=bool((gemini_api_key or "").strip()),
+        has_moonshot_api_key=bool((moonshot_api_key or "").strip()),
+        has_deepl_api_key=bool((deepl_api_key or "").strip()),
+    )
 
     thread = threading.Thread(
         target=_process_translate_only_job,

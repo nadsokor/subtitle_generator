@@ -216,6 +216,100 @@
       font-size: 0.8rem;
       color: var(--muted);
     }
+    .parallel-detail-panel {
+      margin-top: 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+      overflow: hidden;
+    }
+    .parallel-detail-title {
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .parallel-detail-list {
+      max-height: 250px;
+      overflow: auto;
+    }
+    .parallel-detail-item {
+      padding: 0.58rem 0.75rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .parallel-detail-item:last-child {
+      border-bottom: none;
+    }
+    .parallel-detail-top {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-width: 0;
+    }
+    .parallel-detail-index {
+      color: var(--muted);
+      font-size: 0.78rem;
+      flex: 0 0 auto;
+    }
+    .parallel-detail-file {
+      font-size: 0.84rem;
+      flex: 1 1 auto;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .parallel-detail-badge {
+      flex: 0 0 auto;
+      font-size: 0.75rem;
+      border-radius: 999px;
+      padding: 0.1rem 0.45rem;
+      border: 1px solid transparent;
+    }
+    .parallel-detail-badge.queued {
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .parallel-detail-badge.running {
+      color: var(--accent);
+      border-color: rgba(167, 139, 250, 0.45);
+      background: rgba(167, 139, 250, 0.12);
+    }
+    .parallel-detail-badge.done {
+      color: var(--success);
+      border-color: rgba(52, 211, 153, 0.45);
+      background: rgba(52, 211, 153, 0.1);
+    }
+    .parallel-detail-badge.fail {
+      color: var(--error);
+      border-color: rgba(248, 113, 113, 0.45);
+      background: rgba(248, 113, 113, 0.12);
+    }
+    .parallel-detail-badge.canceled {
+      color: #fbbf24;
+      border-color: rgba(251, 191, 36, 0.45);
+      background: rgba(251, 191, 36, 0.12);
+    }
+    .parallel-detail-sub {
+      margin-top: 0.25rem;
+      display: flex;
+      gap: 0.55rem;
+      align-items: baseline;
+      color: var(--muted);
+      min-width: 0;
+    }
+    .parallel-detail-progress {
+      flex: 0 0 auto;
+      font-size: 0.78rem;
+    }
+    .parallel-detail-message {
+      flex: 1 1 auto;
+      font-size: 0.78rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .ffmpeg-banner {
       background: rgba(248, 113, 113, 0.12);
       border: 1px solid var(--error);
@@ -491,6 +585,10 @@
         <button type="button" class="btn" id="cancelBtn" disabled>终止任务</button>
       </div>
       <div class="status" id="status"></div>
+      <div class="parallel-detail-panel" id="parallelDetailPanel" style="display: none;">
+        <div class="parallel-detail-title">并行任务明细</div>
+        <div class="parallel-detail-list" id="parallelDetailList"></div>
+      </div>
       <div class="hint" id="downloadList" style="margin-top: 0.6rem;"></div>
       <div class="progress-bar-wrap" id="progressBarWrap" style="display: none;">
         <div class="progress-bar-fill" id="progressBarFill"></div>
@@ -502,7 +600,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.10";
+    const APP_VERSION = "1.11";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -542,6 +640,8 @@
     const submitBtn = document.getElementById("submitBtn");
     const cancelBtn = document.getElementById("cancelBtn");
     const statusEl = document.getElementById("status");
+    const parallelDetailPanel = document.getElementById("parallelDetailPanel");
+    const parallelDetailList = document.getElementById("parallelDetailList");
     const downloadList = document.getElementById("downloadList");
     const progressBarWrap = document.getElementById("progressBarWrap");
     const progressBarFill = document.getElementById("progressBarFill");
@@ -565,6 +665,7 @@
     let stopQueue = false;
     let parallelRunEnabled = false;
     let parallelTotalFiles = 0;
+    let parallelFileNames = [];
     let autoDownloadChain = Promise.resolve();
 
     function updateModeUI() {
@@ -601,6 +702,9 @@
       parallelTaskStates.clear();
       parallelRunEnabled = false;
       parallelTotalFiles = 0;
+      parallelFileNames = [];
+      parallelDetailList.innerHTML = "";
+      parallelDetailPanel.style.display = "none";
     }
     async function checkFfmpegAndShowBanner() {
       try {
@@ -647,6 +751,16 @@
       try {
         const ids = Array.from(activeJobIds);
         await Promise.all(ids.map((id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" }).catch(() => null)));
+        if (parallelRunEnabled && parallelTotalFiles > 0) {
+          for (let i = 1; i <= parallelTotalFiles; i++) {
+            const state = parallelTaskStates.get(i) || { fileName: parallelFileNames[i - 1] || `文件 ${i}` };
+            if (state.status !== "done" && state.status !== "fail" && state.status !== "canceled") {
+              parallelTaskStates.set(i, { ...state, status: "canceled", message: "已停止", progress: Number.isFinite(state.progress) ? state.progress : 0 });
+            }
+          }
+          renderParallelStatus();
+          renderParallelDetails();
+        }
         showStatus(`已请求终止 ${ids.length} 个运行中任务，并停止后续队列`, "success");
       } catch (_) {
         showStatus("终止任务请求失败", "error");
@@ -809,6 +923,58 @@
       progressBarWrap.style.display = "none";
       progressEta.textContent = "";
       downloadList.innerHTML = "";
+      parallelDetailList.innerHTML = "";
+      parallelDetailPanel.style.display = "none";
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;",
+      })[ch] || ch);
+    }
+
+    function getParallelStatusMeta(status) {
+      if (status === "running") return { label: "执行中", cls: "running" };
+      if (status === "done") return { label: "完成", cls: "done" };
+      if (status === "fail") return { label: "失败", cls: "fail" };
+      if (status === "canceled") return { label: "已停止", cls: "canceled" };
+      return { label: "排队中", cls: "queued" };
+    }
+
+    function renderParallelDetails() {
+      if (!parallelRunEnabled || parallelTotalFiles <= 1) {
+        parallelDetailList.innerHTML = "";
+        parallelDetailPanel.style.display = "none";
+        return;
+      }
+      const rows = [];
+      for (let i = 1; i <= parallelTotalFiles; i++) {
+        const state = parallelTaskStates.get(i) || {};
+        const status = state.status || "queued";
+        const fileLabel = state.fileName || parallelFileNames[i - 1] || `文件 ${i}`;
+        const progress = Number.isFinite(state.progress) ? Math.max(0, Math.min(100, Math.round(state.progress))) : 0;
+        const message = state.message || (status === "queued" ? "等待调度…" : "");
+        const meta = getParallelStatusMeta(status);
+        rows.push(
+          `<div class="parallel-detail-item">` +
+          `<div class="parallel-detail-top">` +
+          `<span class="parallel-detail-index">#${i}</span>` +
+          `<span class="parallel-detail-file">${escapeHtml(fileLabel)}</span>` +
+          `<span class="parallel-detail-badge ${meta.cls}">${meta.label}</span>` +
+          `</div>` +
+          `<div class="parallel-detail-sub">` +
+          `<span class="parallel-detail-progress">${progress}%</span>` +
+          `<span class="parallel-detail-message">${escapeHtml(message)}</span>` +
+          `</div>` +
+          `</div>`
+        );
+      }
+      parallelDetailList.innerHTML = rows.join("");
+      parallelDetailPanel.style.display = "block";
     }
 
     function queueAutoDownload(url, filename) {
@@ -827,6 +993,7 @@
       if (!parallelRunEnabled || parallelTotalFiles <= 0) return;
       let done = 0;
       let fail = 0;
+      let canceled = 0;
       let running = 0;
       let progressSum = 0;
       for (let i = 1; i <= parallelTotalFiles; i++) {
@@ -836,12 +1003,13 @@
         progressSum += p;
         if (s.status === "done") done += 1;
         else if (s.status === "fail") fail += 1;
+        else if (s.status === "canceled") canceled += 1;
         else if (s.status === "running") running += 1;
       }
-      const queued = Math.max(0, parallelTotalFiles - done - fail - running);
+      const queued = Math.max(0, parallelTotalFiles - done - fail - canceled - running);
       const overall = Math.round(progressSum / parallelTotalFiles);
       showProgress(overall, null);
-      const msg = `并行执行中：运行 ${running}，排队 ${queued}，完成 ${done}，失败 ${fail}`;
+      const msg = `并行执行中：运行 ${running}，排队 ${queued}，完成 ${done}，失败 ${fail}，停止 ${canceled}`;
       const type = running > 0 ? "loading" : (fail > 0 ? "error" : "success");
       showStatus(running > 0 ? `<span class="spinner"></span>${msg}` : msg, type);
     }
@@ -851,6 +1019,7 @@
       const prev = parallelTaskStates.get(index) || {};
       parallelTaskStates.set(index, { ...prev, ...patch });
       renderParallelStatus();
+      renderParallelDetails();
     }
 
     async function triggerDownload(url, preferredName) {
@@ -1152,7 +1321,10 @@
       parallelTaskStates.clear();
       parallelRunEnabled = false;
       parallelTotalFiles = 0;
+      parallelFileNames = files.map((f) => f.name);
       autoDownloadChain = Promise.resolve();
+      parallelDetailList.innerHTML = "";
+      parallelDetailPanel.style.display = "none";
 
       let okCount = 0;
       let failCount = 0;
@@ -1161,6 +1333,18 @@
         const workerCount = (batchMode && canParallel) ? Math.min(getParallelFileCount(), files.length) : 1;
         parallelRunEnabled = workerCount > 1;
         parallelTotalFiles = files.length;
+        if (parallelRunEnabled) {
+          for (let i = 0; i < files.length; i++) {
+            parallelTaskStates.set(i + 1, {
+              status: "queued",
+              progress: 0,
+              fileName: files[i].name,
+              message: "等待调度…",
+            });
+          }
+          renderParallelStatus();
+          renderParallelDetails();
+        }
         let nextIndex = 0;
         showStatus(
           workerCount > 1
@@ -1178,6 +1362,13 @@
             const file = files[i];
             if (!parallelRunEnabled) {
               fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
+            } else {
+              setParallelTaskState(i + 1, {
+                status: "running",
+                progress: 0,
+                fileName: file.name,
+                message: "提交任务中…",
+              });
             }
             try {
               const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length, batchMode);
@@ -1207,6 +1398,21 @@
         await Promise.all(workers);
 
         if (stopQueue) {
+          if (parallelRunEnabled) {
+            for (let i = 1; i <= files.length; i++) {
+              const state = parallelTaskStates.get(i) || { fileName: parallelFileNames[i - 1] || `文件 ${i}` };
+              if (state.status !== "done" && state.status !== "fail" && state.status !== "canceled") {
+                parallelTaskStates.set(i, {
+                  ...state,
+                  status: "canceled",
+                  message: "已停止",
+                  progress: Number.isFinite(state.progress) ? state.progress : 0,
+                });
+              }
+            }
+            renderParallelStatus();
+            renderParallelDetails();
+          }
           const donePercent = files.length ? Math.round(((okCount + failCount) / files.length) * 100) : 0;
           showProgress(donePercent, null);
           showStatus(`队列已停止：成功 ${okCount}，失败 ${failCount}`, "success");
