@@ -1358,6 +1358,9 @@ def translate_segments(
                 detail="翻译失败（moonshot）: 请填写 Moonshot API Key，或在服务端设置 MOONSHOT_API_KEY",
             )
         model = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "kimi-k2-turbo-preview")
+        model_lc = model.lower()
+        # Moonshot 文档中 kimi-k2.5 系列要求 temperature=1
+        moonshot_temperature = 1 if "kimi-k2.5" in model_lc else 0
         lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
@@ -1425,7 +1428,7 @@ def translate_segments(
                             {"role": "user", "content": src_text},
                         ],
                         max_tokens=1024,
-                        temperature=0,
+                        temperature=moonshot_temperature,
                     )
                     return (one_resp.choices[0].message.content or "").strip() or src_text
                 except OpenAIRateLimitError as e:
@@ -1477,7 +1480,7 @@ def translate_segments(
                             {"role": "user", "content": user_content},
                         ],
                         max_tokens=4096,
-                        temperature=0,
+                        temperature=moonshot_temperature,
                     )
                     try:
                         # Moonshot 文档中 response_format 支持 json_object，未声明 json_schema

@@ -91,7 +91,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 - **DeepL**：在 [DeepL 开发者](https://www.deepl.com/pro-api) 获取 API Key，在页面「翻译」→ 选 DeepL 后出现的输入框中填写，或设置环境变量 `DEEPL_API_KEY` / `DEEPL_AUTH_KEY`
 - **OpenAI**：在 [OpenAI API](https://platform.openai.com/api-keys) 创建 Key，在页面填写或设置 `OPENAI_API_KEY`；可选环境变量 `OPENAI_TRANSLATE_MODEL` 指定默认模型
 - **Gemini**：在 [Gemini API](https://ai.google.dev/gemini-api/docs/api-key) 创建 Key，在页面填写或设置 `GEMINI_API_KEY`；可选环境变量 `GEMINI_TRANSLATE_MODEL` 指定默认模型
-- **Moonshot**：在 [Moonshot 平台](https://platform.moonshot.cn/docs/overview) 获取 API Key，在页面填写或设置 `MOONSHOT_API_KEY`；可选 `MOONSHOT_BASE_URL`（默认 `https://api.moonshot.cn/v1`）与 `MOONSHOT_TRANSLATE_MODEL`（默认 `kimi-k2-turbo-preview`）
+- **Moonshot**：在 [Moonshot 平台](https://platform.moonshot.cn/docs/overview) 获取 API Key，在页面填写或设置 `MOONSHOT_API_KEY`；可选 `MOONSHOT_BASE_URL`（默认 `https://api.moonshot.cn/v1`）与 `MOONSHOT_TRANSLATE_MODEL`（默认 `kimi-k2-turbo-preview`，`kimi-k2.5` 会自动适配 `temperature=1`）
 
 ## 项目结构
 
