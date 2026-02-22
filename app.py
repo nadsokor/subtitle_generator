@@ -15,7 +15,10 @@ import time
 import uuid
 import zipfile
 import json
+import logging
 import urllib.request
+import urllib.error
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List, Tuple
 from urllib.parse import quote
@@ -27,7 +30,7 @@ from faster_whisper import WhisperModel
 from deep_translator import GoogleTranslator
 from openai import OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -92,6 +95,7 @@ TRANSLATION_APIS = [
     ("deepl", "DeepL"),
     ("openai", "OpenAI"),
     ("gemini", "Gemini"),
+    ("moonshot", "Moonshot"),
 ]
 
 # 部分语言在翻译 API 中的目标代码（与 Whisper 不一致时）
@@ -124,6 +128,16 @@ GEMINI_TRANSLATE_MODELS = [
     ("gemini-2.0-flash", "gemini-2.0-flash"),
 ]
 
+# 前端可选的 Moonshot 翻译模型
+MOONSHOT_TRANSLATE_MODELS = [
+    ("kimi-k2-turbo-preview", "kimi-k2-turbo-preview（推荐）"),
+    ("kimi-k2-thinking-turbo", "kimi-k2-thinking-turbo"),
+    ("kimi-k2-0905-preview", "kimi-k2-0905-preview"),
+    ("moonshot-v1-8k", "moonshot-v1-8k"),
+    ("moonshot-v1-32k", "moonshot-v1-32k"),
+    ("moonshot-v1-128k", "moonshot-v1-128k"),
+]
+
 app = FastAPI(title="视频自动字幕", description="本地 Whisper 多语字幕生成")
 
 # 静态文件（前端）
@@ -135,6 +149,143 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 APP_DIR = Path(__file__).resolve().parent
 FFMPEG_APP_DIR = APP_DIR / ".ffmpeg"
 _FFMPEG_BIN_DIR: Optional[Path] = None  # 当前使用的 ffmpeg 目录（应用内或已加入 PATH 的由调用方判断）
+
+# 日志目录（按大小轮转并自动清理历史）
+LOG_DIR = APP_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+API_LOG_FILE = LOG_DIR / "api_requests.log"
+API_LOG_MAX_BYTES = _env_int("AUTO_SUBBED_API_LOG_MAX_BYTES", 10 * 1024 * 1024, min_value=1024 * 64, max_value=1024 * 1024 * 512)
+API_LOG_BACKUP_COUNT = _env_int("AUTO_SUBBED_API_LOG_BACKUP_COUNT", 10, min_value=1, max_value=200)
+_SENSITIVE_FIELD_MARKERS = ("api_key", "apikey", "authorization", "token", "password", "secret", "key")
+_MAX_LOG_VALUE_LENGTH = 280
+
+
+def _setup_api_logger() -> logging.Logger:
+    logger = logging.getLogger("auto_subbed.api")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    handler = RotatingFileHandler(
+        str(API_LOG_FILE),
+        maxBytes=API_LOG_MAX_BYTES,
+        backupCount=API_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(fmt)
+    logger.addHandler(handler)
+    return logger
+
+
+API_LOGGER = _setup_api_logger()
+
+
+def _safe_log_value(value: Any) -> Any:
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return _redact_payload({str(k): v for k, v in value.items()})
+    if isinstance(value, list):
+        return [_safe_log_value(v) for v in value]
+    text = str(value)
+    if len(text) > _MAX_LOG_VALUE_LENGTH:
+        return text[:_MAX_LOG_VALUE_LENGTH] + "...(truncated)"
+    return text
+
+
+def _mask_secret(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return "***"
+    return text[:3] + "***" + text[-3:]
+
+
+def _redact_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    redacted: Dict[str, Any] = {}
+    for key, value in payload.items():
+        key_text = str(key).lower()
+        is_sensitive = any(marker in key_text for marker in _SENSITIVE_FIELD_MARKERS) and not key_text.startswith("has_")
+        if is_sensitive:
+            redacted[str(key)] = _mask_secret(value)
+        else:
+            redacted[str(key)] = _safe_log_value(value)
+    return redacted
+
+
+def _log_api_event(event: str, **payload: Any) -> None:
+    try:
+        data = {"event": event, **payload}
+        API_LOGGER.info(json.dumps(_redact_payload(data), ensure_ascii=False, separators=(",", ":")))
+    except Exception as e:
+        API_LOGGER.error(f"写入日志失败: {e}")
+
+
+_log_api_event(
+    "log_init",
+    log_file=str(API_LOG_FILE),
+    max_bytes=API_LOG_MAX_BYTES,
+    backup_count=API_LOG_BACKUP_COUNT,
+)
+
+
+@app.middleware("http")
+async def api_request_log_middleware(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    request_id = str(uuid.uuid4())[:8]
+    start = time.perf_counter()
+    client_ip = request.client.host if request.client else ""
+    _log_api_event(
+        "request_start",
+        request_id=request_id,
+        method=request.method,
+        path=path,
+        query=dict(request.query_params),
+        client_ip=client_ip,
+        user_agent=request.headers.get("user-agent", ""),
+        content_type=request.headers.get("content-type", ""),
+        content_length=request.headers.get("content-length", ""),
+    )
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_api_event(
+            "request_error",
+            request_id=request_id,
+            method=request.method,
+            path=path,
+            duration_ms=duration_ms,
+            error=repr(e),
+        )
+        raise
+    duration_ms = int((time.perf_counter() - start) * 1000)
+    _log_api_event(
+        "request_end",
+        request_id=request_id,
+        method=request.method,
+        path=path,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+    )
+    return response
 
 
 def _platform_tag() -> str:
@@ -344,12 +495,35 @@ def _init_job(job_id: str, filename: str, filename_original: Optional[str] = Non
             "eta_seconds": None,
         }
         JOB_CANCEL[job_id] = threading.Event()
+    _log_api_event(
+        "job_init",
+        job_id=job_id,
+        filename=filename,
+        filename_original=filename_original or "",
+    )
 
 
 def _update_job(job_id: str, **kwargs: Any) -> None:
+    log_data: Optional[Dict[str, Any]] = None
     with JOB_LOCK:
         if job_id in JOB_STORE:
+            old_status = JOB_STORE[job_id].get("status")
+            old_stage = JOB_STORE[job_id].get("stage")
             JOB_STORE[job_id].update(kwargs)
+            new_status = JOB_STORE[job_id].get("status")
+            new_stage = JOB_STORE[job_id].get("stage")
+            status_changed = ("status" in kwargs and new_status != old_status)
+            stage_changed = ("stage" in kwargs and new_stage != old_stage)
+            if status_changed or stage_changed:
+                log_data = {
+                    "job_id": job_id,
+                    "status": new_status,
+                    "stage": new_stage,
+                    "message": JOB_STORE[job_id].get("message", ""),
+                    "progress": JOB_STORE[job_id].get("progress"),
+                }
+    if log_data:
+        _log_api_event("job_update", **log_data)
 
 
 def _get_job(job_id: str) -> Optional[Dict[str, Any]]:
@@ -390,16 +564,25 @@ def _safe_filename_token(value: str) -> str:
     return token or "model"
 
 
-def _translated_suffix(translate_to: str, translation_api: str, openai_model: str, gemini_model: str) -> str:
+def _translated_suffix(
+    translate_to: str,
+    translation_api: str,
+    openai_model: str,
+    gemini_model: str,
+    moonshot_model: str,
+) -> str:
     parts = [translate_to]
     api_name = (translation_api or "").strip().lower()
-    if api_name and api_name not in ("none", "openai", "gemini"):
+    if api_name and api_name not in ("none", "openai", "gemini", "moonshot"):
         parts.append(_safe_filename_token(api_name))
     if api_name == "openai":
         model_name = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
         parts.append(_safe_filename_token(model_name))
     if api_name == "gemini":
         model_name = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
+        parts.append(_safe_filename_token(model_name))
+    if api_name == "moonshot":
+        model_name = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "kimi-k2-turbo-preview")
         parts.append(_safe_filename_token(model_name))
     return "." + ".".join(parts)
 
@@ -656,9 +839,16 @@ def _process_job(
     openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
+    openai_reasoning_effort: str,
     gemini_api_key: str,
+    gemini_base_url: str,
     gemini_model: str,
+    gemini_thinking_level: str,
+    moonshot_api_key: str,
+    moonshot_base_url: str,
+    moonshot_model: str,
     translation_rules: str,
+    translation_batch_size: int,
     base_name: str = "",
 ) -> None:
     work_dir = None
@@ -789,9 +979,16 @@ def _process_job(
                 openai_base_url=openai_base_url or None,
                 deepl_api_key=deepl_api_key or None,
                 openai_model=openai_model or None,
+                openai_reasoning_effort=openai_reasoning_effort or None,
                 gemini_api_key=gemini_api_key or None,
+                gemini_base_url=gemini_base_url or None,
                 gemini_model=gemini_model or None,
+                gemini_thinking_level=gemini_thinking_level or None,
+                moonshot_api_key=moonshot_api_key or None,
+                moonshot_base_url=moonshot_base_url or None,
+                moonshot_model=moonshot_model or None,
                 translation_rules=translation_rules or None,
+                translation_batch_size=translation_batch_size,
                 progress_cb=translate_progress,
                 status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
                 cancel_event=cancel_event,
@@ -824,9 +1021,16 @@ def _process_translate_only_job(
     openai_base_url: str,
     deepl_api_key: str,
     openai_model: str,
+    openai_reasoning_effort: str,
     gemini_api_key: str,
+    gemini_base_url: str,
     gemini_model: str,
+    gemini_thinking_level: str,
+    moonshot_api_key: str,
+    moonshot_base_url: str,
+    moonshot_model: str,
     translation_rules: str,
+    translation_batch_size: int,
     base_name: str,
 ) -> None:
     """仅翻译：读取 SRT 文件，翻译后写回 SRT，不涉及转写。"""
@@ -861,9 +1065,16 @@ def _process_translate_only_job(
             openai_base_url=openai_base_url or None,
             deepl_api_key=deepl_api_key or None,
             openai_model=openai_model or None,
+            openai_reasoning_effort=openai_reasoning_effort or None,
             gemini_api_key=gemini_api_key or None,
+            gemini_base_url=gemini_base_url or None,
             gemini_model=gemini_model or None,
+            gemini_thinking_level=gemini_thinking_level or None,
+            moonshot_api_key=moonshot_api_key or None,
+            moonshot_base_url=moonshot_base_url or None,
+            moonshot_model=moonshot_model or None,
             translation_rules=translation_rules or None,
+            translation_batch_size=translation_batch_size,
             progress_cb=translate_progress,
             status_cb=lambda msg: _update_job(job_id, stage="translating", message=msg, eta_seconds=None),
             cancel_event=cancel_event,
@@ -886,6 +1097,58 @@ def _translator_target_code(lang: str) -> str:
     return TRANSLATOR_TARGET_MAP.get(lang, lang)
 
 
+def _resolve_batch_size(value: Optional[int], default: int, *, min_value: int = 1, max_value: int = 200) -> int:
+    """将用户输入的每批条数解析为安全整数，<=0 时使用默认值。"""
+    try:
+        n = int(value) if value is not None else 0
+    except Exception:
+        n = 0
+    if n <= 0:
+        n = default
+    n = max(min_value, n)
+    n = min(max_value, n)
+    return n
+
+
+def _normalize_gemini_thinking_level(value: Optional[str]) -> Optional[str]:
+    """将 Gemini thinking level 规范化为 SDK 支持值。"""
+    raw = (value or "").strip().upper()
+    if not raw or raw in {"AUTO", "DEFAULT", "UNSPECIFIED", "THINKING_LEVEL_UNSPECIFIED"}:
+        return None
+    aliases = {
+        "MIN": "MINIMAL",
+        "NONE": "MINIMAL",
+        "OFF": "MINIMAL",
+        "DISABLED": "MINIMAL",
+    }
+    raw = aliases.get(raw, raw)
+    allowed = {"MINIMAL", "LOW", "MEDIUM", "HIGH"}
+    if raw in allowed:
+        return raw
+    raise HTTPException(
+        status_code=400,
+        detail="Gemini Thinking Level 不合法。可用值：MINIMAL / LOW / MEDIUM / HIGH（留空为默认）。",
+    )
+
+
+def _normalize_openai_reasoning_effort(value: Optional[str]) -> Optional[str]:
+    """将 OpenAI reasoning effort 规范化。"""
+    raw = (value or "").strip().lower()
+    if not raw or raw in {"auto", "default", "none", "off"}:
+        return None
+    aliases = {
+        "min": "minimal",
+    }
+    raw = aliases.get(raw, raw)
+    allowed = {"minimal", "low", "medium", "high"}
+    if raw in allowed:
+        return raw
+    raise HTTPException(
+        status_code=400,
+        detail="OpenAI reasoning effort 不合法。可用值：minimal / low / medium / high（留空为默认）。",
+    )
+
+
 def translate_segments(
     segments: list,
     target_lang: str,
@@ -896,17 +1159,24 @@ def translate_segments(
     openai_base_url: str | None = None,
     deepl_api_key: str | None = None,
     openai_model: str | None = None,
+    openai_reasoning_effort: str | None = None,
     gemini_api_key: str | None = None,
+    gemini_base_url: str | None = None,
     gemini_model: str | None = None,
+    gemini_thinking_level: str | None = None,
+    moonshot_api_key: str | None = None,
+    moonshot_base_url: str | None = None,
+    moonshot_model: str | None = None,
     translation_rules: str | None = None,
+    translation_batch_size: int | None = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     status_cb: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> list:
     """
     将 segments 中每条 text 翻译成目标语言，时间轴不变。
-    api_name: 'google' | 'deepl' | 'openai' | 'gemini'
-    translation_rules: 可选，自定义风格与规则（OpenAI/Gemini 支持）。
+    api_name: 'google' | 'deepl' | 'openai' | 'gemini' | 'moonshot'
+    translation_rules: 可选，自定义风格与规则（OpenAI/Gemini/Moonshot 支持）。
     """
     if not segments or api_name == "none":
         return segments
@@ -941,8 +1211,8 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        # 每批最多 50 条，且总字符数受控，提升吞吐并降低超时风险
-        batch_max_items = 50
+        # 每批条数支持用户自定义；DeepL 单批上限保持 50
+        batch_max_items = _resolve_batch_size(translation_batch_size, 50, max_value=50)
         batch_max_chars = 12000
         pos = 0
         while pos < len(pending):
@@ -997,6 +1267,7 @@ def translate_segments(
         model = (openai_model or "").strip() or os.environ.get("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
         model_lc = model.lower()
         gpt5_mode = "gpt-5" in model_lc
+        reasoning_effort = _normalize_openai_reasoning_effort(openai_reasoning_effort)
         lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
@@ -1019,8 +1290,27 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        batch_max_items = 6 if gpt5_mode else 12
+        default_batch_items = 6 if gpt5_mode else 12
+        batch_max_items = _resolve_batch_size(translation_batch_size, default_batch_items, max_value=200)
         batch_max_chars = 2500 if gpt5_mode else 5000
+
+        def _openai_chat_create(**kwargs: Any) -> Any:
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+            try:
+                return client.chat.completions.create(**kwargs)
+            except TypeError as e:
+                # 兼容较老 SDK / 不支持该参数的中转
+                if "reasoning_effort" in str(e) and "reasoning_effort" in kwargs:
+                    kwargs.pop("reasoning_effort", None)
+                    return client.chat.completions.create(**kwargs)
+                raise
+            except Exception as e:
+                # 兼容仅服务端不支持该字段的中转实现
+                if "reasoning_effort" in str(e).lower() and "reasoning_effort" in kwargs:
+                    kwargs.pop("reasoning_effort", None)
+                    return client.chat.completions.create(**kwargs)
+                raise
 
         def _parse_openai_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -1058,7 +1348,7 @@ def translate_segments(
                 )
             for attempt in range(2):
                 try:
-                    one_resp = client.chat.completions.create(
+                    one_resp = _openai_chat_create(
                         model=model,
                         messages=[
                             {"role": "system", "content": single_system},
@@ -1116,16 +1406,16 @@ def translate_segments(
                     # gpt-5 默认走非 strict，减少中转兼容问题
                     if gpt5_mode:
                         try:
-                            resp = client.chat.completions.create(
+                            resp = _openai_chat_create(
                                 **kwargs,
                                 response_format={"type": "json_object"},
                             )
                         except Exception:
-                            resp = client.chat.completions.create(**kwargs)
+                            resp = _openai_chat_create(**kwargs)
                     else:
                         # 其他模型优先 strict 结构化输出
                         try:
-                            resp = client.chat.completions.create(
+                            resp = _openai_chat_create(
                                 **kwargs,
                                 response_format={
                                     "type": "json_schema",
@@ -1150,12 +1440,12 @@ def translate_segments(
                             )
                         except Exception:
                             try:
-                                resp = client.chat.completions.create(
+                                resp = _openai_chat_create(
                                     **kwargs,
                                     response_format={"type": "json_object"},
                                 )
                             except Exception:
-                                resp = client.chat.completions.create(**kwargs)
+                                resp = _openai_chat_create(**kwargs)
 
                     finish_reason = (resp.choices[0].finish_reason or "").lower()
                     if finish_reason == "length":
@@ -1227,26 +1517,24 @@ def translate_segments(
 
         return [x if x is not None else segments[i] for i, x in enumerate(out)]
 
-    # Gemini: 使用单客户端 + 批量请求，减少请求次数提升速度
-    if api_name == "gemini":
-        if genai is None:
-            raise HTTPException(
-                status_code=500,
-                detail="翻译失败（gemini）: 未安装 google-genai，或当前 Python 版本不兼容（Gemini 需 Python 3.9+）。请先 pip install -r requirements.txt。",
-            )
-        key = (gemini_api_key or "").strip() or os.environ.get("GEMINI_API_KEY")
+    # Moonshot: 使用 OpenAI 兼容接口 + 批量请求
+    if api_name == "moonshot":
+        key = (moonshot_api_key or "").strip() or os.environ.get("MOONSHOT_API_KEY")
         if not key:
             raise HTTPException(
                 status_code=500,
-                detail="翻译失败（gemini）: 请填写 Gemini API Key，或在服务端设置 GEMINI_API_KEY",
+                detail="翻译失败（moonshot）: 请填写 Moonshot API Key，或在服务端设置 MOONSHOT_API_KEY",
             )
-        model = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
+        model = (moonshot_model or "").strip() or os.environ.get("MOONSHOT_TRANSLATE_MODEL", "kimi-k2-turbo-preview")
         model_lc = model.lower()
+        # Moonshot 文档中 kimi-k2.5 系列要求 temperature=1
+        moonshot_temperature = 1 if "kimi-k2.5" in model_lc else 0
         lang_name = LLM_TARGET_LANG_NAMES.get(
             target_lang if target_lang != "zh-CN" else "zh", "English"
         )
         rules = (translation_rules or "").strip()
-        client = genai.Client(api_key=key)
+        base_url = (moonshot_base_url or "").strip() or os.environ.get("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1")
+        client = OpenAI(api_key=key, base_url=base_url or None)
 
         out: List[Optional[dict]] = [None] * total
         pending: List[Tuple[int, dict, str]] = []
@@ -1263,10 +1551,289 @@ def translate_segments(
                 continue
             pending.append((idx, seg, text))
 
-        batch_max_items = 8 if "pro" in model_lc else 16
-        batch_max_chars = 3200 if "pro" in model_lc else 6400
+        batch_max_items = _resolve_batch_size(translation_batch_size, 12, max_value=200)
+        batch_max_chars = 5000
+
+        def _parse_batch_json(raw_text: str, expected_len: int) -> List[str]:
+            raw = (raw_text or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+            raw = re.sub(r"\s*```$", "", raw).strip()
+            parsed: Any
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                m_obj = re.search(r"\{[\s\S]*\}", raw)
+                m_arr = re.search(r"\[[\s\S]*\]", raw)
+                if m_obj:
+                    parsed = json.loads(m_obj.group(0))
+                elif m_arr:
+                    parsed = json.loads(m_arr.group(0))
+                else:
+                    raise
+            if isinstance(parsed, dict):
+                items = parsed.get("items")
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ValueError("Moonshot 返回既不是 JSON 对象也不是数组")
+            if not isinstance(items, list) or len(items) != expected_len:
+                raise ValueError("Moonshot 返回 items 数量与请求不一致")
+            return [str(x).strip() if x is not None else "" for x in items]
+
+        def _single_translate(src_text: str) -> str:
+            single_system = f"You are a translator. Output only the translation in {lang_name}, no explanation."
+            if rules:
+                single_system = (
+                    f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
+                    f"Output only the translation in {lang_name}, no explanation."
+                )
+            for attempt in range(2):
+                try:
+                    one_resp = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": single_system},
+                            {"role": "user", "content": src_text},
+                        ],
+                        max_tokens=1024,
+                        temperature=moonshot_temperature,
+                    )
+                    return (one_resp.choices[0].message.content or "").strip() or src_text
+                except OpenAIRateLimitError as e:
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="Moonshot 请求过于频繁（限流）。请稍后再试，或检查平台配额限制。",
+                        ) from e
+                except Exception as e:
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        err = str(e).lower()
+                        if "insufficient_quota" in err or "quota" in err:
+                            raise HTTPException(
+                                status_code=402,
+                                detail="Moonshot 报错与额度/配额有关，请检查平台账户额度与限流配置。",
+                            ) from e
+                        raise RuntimeError(f"Moonshot 单条翻译失败：{e!s}") from e
+            raise RuntimeError("Moonshot 单条翻译失败：未获取到有效返回")
+
+        def _call_batch(batch_texts: List[str]) -> List[str]:
+            expected_len = len(batch_texts)
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            system_content = (
+                f"You are a translator. Translate every string to {lang_name}. "
+                "Return ONLY valid JSON object with this schema: "
+                "{\"items\": [\"translated string 1\", \"translated string 2\", ...]}. "
+                "The items length and order must exactly match input. "
+                "No markdown, no explanation, no extra keys."
+            )
+            if rules:
+                system_content = (
+                    f"You are a translator. Style and rules you must follow:\n{rules}\n\n"
+                    f"Translate every string to {lang_name}. Return ONLY valid JSON object with schema "
+                    "{\"items\": [...]}. items length and order must exactly match input. "
+                    "No markdown, no explanation, no extra keys."
+                )
+            user_content = json.dumps(batch_texts, ensure_ascii=False)
+            for attempt in range(2):
+                try:
+                    kwargs = dict(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_content},
+                            {"role": "user", "content": user_content},
+                        ],
+                        max_tokens=4096,
+                        temperature=moonshot_temperature,
+                    )
+                    try:
+                        # Moonshot 文档中 response_format 支持 json_object，未声明 json_schema
+                        resp = client.chat.completions.create(
+                            **kwargs,
+                            response_format={"type": "json_object"},
+                        )
+                    except Exception:
+                        resp = client.chat.completions.create(**kwargs)
+
+                    finish_reason = (resp.choices[0].finish_reason or "").lower()
+                    if finish_reason == "length":
+                        raise ValueError("Moonshot 输出被截断（finish_reason=length）")
+                    raw = (resp.choices[0].message.content or "").strip()
+                    return _parse_batch_json(raw, expected_len)
+                except OpenAIRateLimitError as e:
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="Moonshot 请求过于频繁（限流）。请稍后再试，或检查平台配额限制。",
+                        ) from e
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "insufficient_quota" in err_msg or "quota" in err_msg:
+                        raise HTTPException(
+                            status_code=402,
+                            detail="Moonshot 报错与额度/配额有关，请检查平台账户额度与限流配置。",
+                        ) from e
+                    if attempt < 1:
+                        time.sleep(2 ** (attempt + 1))
+                    else:
+                        raise RuntimeError(f"Moonshot 批量解析失败：{e!s}") from e
+            raise RuntimeError("Moonshot 批量解析失败：未获取到有效返回")
+
+        def _translate_batch_with_split(batch_meta: List[Tuple[int, dict, str]]) -> List[str]:
+            if not batch_meta:
+                return []
+            texts = [x[2] for x in batch_meta]
+            try:
+                return _call_batch(texts)
+            except RuntimeError:
+                if len(batch_meta) == 1:
+                    return [_single_translate(batch_meta[0][2])]
+                mid = len(batch_meta) // 2
+                left = _translate_batch_with_split(batch_meta[:mid])
+                right = _translate_batch_with_split(batch_meta[mid:])
+                return left + right
+
+        pos = 0
+        batch_no = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta: List[Tuple[int, dict, str]] = []
+            chars = 0
+            while pos < len(pending) and len(batch_meta) < batch_max_items:
+                m = pending[pos]
+                t = m[2]
+                if batch_meta and chars + len(t) > batch_max_chars:
+                    break
+                batch_meta.append(m)
+                chars += len(t)
+                pos += 1
+
+            batch_no += 1
+            if status_cb:
+                status_cb(f"第 {batch_no} 批等待 Moonshot 返回中…")
+            translated_items = _translate_batch_with_split(batch_meta)
+            for (idx, seg, src_text), translated in zip(batch_meta, translated_items):
+                out[idx - 1] = {**seg, "text": translated or src_text}
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+
+        return [x if x is not None else segments[i] for i, x in enumerate(out)]
+
+    # Gemini: 使用单客户端 + 批量请求（规则与 OpenAI 非 gpt-5 对齐）
+    if api_name == "gemini":
+        key = (gemini_api_key or "").strip() or os.environ.get("GEMINI_API_KEY")
+        if not key:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（gemini）: 请填写 Gemini API Key，或在服务端设置 GEMINI_API_KEY",
+            )
+        relay_base_url = (gemini_base_url or "").strip() or (os.environ.get("GEMINI_BASE_URL") or "").strip()
+        use_relay = bool(relay_base_url)
+        if (not use_relay) and genai is None:
+            raise HTTPException(
+                status_code=500,
+                detail="翻译失败（gemini）: 未安装 google-genai，或当前 Python 版本不兼容（Gemini 需 Python 3.9+）。请先 pip install -r requirements.txt。",
+            )
+        model = (gemini_model or "").strip() or os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash")
+        thinking_level = _normalize_gemini_thinking_level(gemini_thinking_level)
+        lang_name = LLM_TARGET_LANG_NAMES.get(
+            target_lang if target_lang != "zh-CN" else "zh", "English"
+        )
+        rules = (translation_rules or "").strip()
+        client = genai.Client(api_key=key) if not use_relay else None
+        if use_relay:
+            _log_api_event(
+                "gemini_relay_mode",
+                model=model,
+                relay_base_url=relay_base_url,
+                thinking_level=(thinking_level or ""),
+            )
+            if thinking_level and status_cb:
+                status_cb("Gemini Relay 模式暂不传递 Thinking Level 参数")
+
+        out: List[Optional[dict]] = [None] * total
+        pending: List[Tuple[int, dict, str]] = []
+        done = 0
+        for idx, seg in enumerate(segments, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                out[idx - 1] = seg
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+                continue
+            pending.append((idx, seg, text))
+
+        # 每批条数支持用户自定义；默认与 OpenAI 非 gpt-5 一致
+        batch_max_items = _resolve_batch_size(translation_batch_size, 12, max_value=200)
+        batch_max_chars = 5000
+
+        def _short_error(err: Any, max_len: int = 220) -> str:
+            text = str(err or "").replace("\n", " ").strip()
+            if len(text) > max_len:
+                return text[:max_len] + "...(truncated)"
+            return text
+
+        def _is_probably_batch_size_error(err_msg: str) -> bool:
+            msg = (err_msg or "").lower()
+            patterns = (
+                "request too large",
+                "payload too large",
+                "too large",
+                "context length",
+                "maximum context",
+                "token limit",
+                "too many tokens",
+                "input token",
+                "max token",
+                "exceed",
+                "413",
+            )
+            return any(p in msg for p in patterns)
+
+        def _is_auth_error(err_msg: str) -> bool:
+            msg = (err_msg or "").lower()
+            return (
+                "api key not valid" in msg
+                or "invalid api key" in msg
+                or "unauthenticated" in msg
+                or "authentication" in msg
+                or "permission_denied" in msg
+            )
+
+        def _is_model_error(err_msg: str) -> bool:
+            msg = (err_msg or "").lower()
+            return (
+                "model" in msg
+                and (
+                    "not found" in msg
+                    or "unknown model" in msg
+                    or "does not exist" in msg
+                    or "unsupported" in msg
+                )
+            )
 
         def _extract_gemini_text(resp: Any) -> str:
+            if isinstance(resp, dict):
+                chunks: List[str] = []
+                for cand in resp.get("candidates", []) or []:
+                    content = cand.get("content", {}) if isinstance(cand, dict) else {}
+                    for part in (content.get("parts", []) if isinstance(content, dict) else []):
+                        if isinstance(part, dict):
+                            ptxt = part.get("text")
+                            if ptxt:
+                                chunks.append(str(ptxt))
+                return "\n".join(chunks).strip()
             text = getattr(resp, "text", None)
             if text:
                 return str(text)
@@ -1284,6 +1851,71 @@ def translate_segments(
                 return "\n".join(chunks).strip()
             except Exception:
                 return ""
+
+        def _relay_generate_content(prompt: str, *, max_output_tokens: int, json_mode: bool) -> str:
+            base = relay_base_url.rstrip("/")
+            url = f"{base}/v1beta/models/{quote(model, safe='-._~')}:{'generateContent'}"
+            generation_cfg: Dict[str, Any] = {
+                "temperature": 0,
+                "maxOutputTokens": max_output_tokens,
+            }
+            if json_mode:
+                generation_cfg["responseMimeType"] = "application/json"
+            payload: Dict[str, Any] = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": generation_cfg,
+            }
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "x-goog-api-key": key,
+                    "Content-Type": "application/json",
+                    "User-Agent": "auto_subbed/1.0",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                obj = json.loads(body) if body else {}
+                text = _extract_gemini_text(obj)
+                if text:
+                    return text
+                raise RuntimeError(f"Gemini Relay 返回内容为空：{_short_error(body)}")
+            except urllib.error.HTTPError as e:
+                err_body = ""
+                try:
+                    err_body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    err_body = ""
+                err_text = _short_error(f"HTTP {e.code} {err_body}")
+                err_lc = err_text.lower()
+                if e.code in (401, 403) or _is_auth_error(err_lc):
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Gemini Relay 鉴权失败：请检查中转站 key、权限或账号状态。",
+                    ) from e
+                if e.code == 429 or "rate limit" in err_lc or "too many requests" in err_lc:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Gemini Relay 请求过于频繁（限流）。请稍后重试。",
+                    ) from e
+                if e.code == 402 or "quota" in err_lc or "insufficient" in err_lc:
+                    raise HTTPException(
+                        status_code=402,
+                        detail="Gemini Relay 额度不足或配额受限，请检查中转站账户配额。",
+                    ) from e
+                if _is_model_error(err_lc):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Gemini 模型不可用：{model}。请确认中转站支持该模型。",
+                    ) from e
+                raise RuntimeError(f"Gemini Relay 请求失败：{err_text}") from e
+            except urllib.error.URLError as e:
+                raise RuntimeError(f"Gemini Relay 网络请求失败：{_short_error(e)}") from e
 
         def _parse_gemini_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -1326,10 +1958,16 @@ def translate_segments(
                 )
             for attempt in range(2):
                 try:
+                    if use_relay:
+                        raw = _relay_generate_content(single_prompt, max_output_tokens=2048, json_mode=False)
+                        return raw.strip() or src_text
+                    config_one: Dict[str, Any] = {"temperature": 0, "max_output_tokens": 2048}
+                    if thinking_level:
+                        config_one["thinking_config"] = {"thinking_level": thinking_level}
                     one_resp = client.models.generate_content(
                         model=model,
                         contents=single_prompt,
-                        config={"temperature": 0, "max_output_tokens": 2048},
+                        config=config_one,
                     )
                     return _extract_gemini_text(one_resp).strip() or src_text
                 except Exception as e:
@@ -1352,6 +1990,14 @@ def translate_segments(
             expected_len = len(batch_texts)
             if cancel_event and cancel_event.is_set():
                 raise JobCanceled("任务已取消")
+            _log_api_event(
+                "gemini_batch_start",
+                model=model,
+                batch_items=expected_len,
+                batch_chars=sum(len(x) for x in batch_texts),
+                via_relay=use_relay,
+                relay_base_url=relay_base_url if use_relay else "",
+            )
             schema = {
                 "type": "object",
                 "properties": {
@@ -1384,28 +2030,48 @@ def translate_segments(
 
             for attempt in range(2):
                 try:
-                    config_base: Dict[str, Any] = {
-                        "temperature": 0,
-                        "max_output_tokens": 8192,
-                        "response_mime_type": "application/json",
-                    }
-                    try:
-                        resp = client.models.generate_content(
-                            model=model,
-                            contents=prompt,
-                            config={**config_base, "response_json_schema": schema},
-                        )
-                    except Exception:
-                        resp = client.models.generate_content(
-                            model=model,
-                            contents=prompt,
-                            config=config_base,
-                        )
-                    raw = _extract_gemini_text(resp)
-                    return _parse_gemini_batch_json(raw, expected_len)
+                    if use_relay:
+                        raw = _relay_generate_content(prompt, max_output_tokens=8192, json_mode=True)
+                    else:
+                        config_base: Dict[str, Any] = {
+                            "temperature": 0,
+                            "max_output_tokens": 8192,
+                            "response_mime_type": "application/json",
+                        }
+                        if thinking_level:
+                            config_base["thinking_config"] = {"thinking_level": thinking_level}
+                        try:
+                            resp = client.models.generate_content(
+                                model=model,
+                                contents=prompt,
+                                config={**config_base, "response_json_schema": schema},
+                            )
+                        except Exception:
+                            resp = client.models.generate_content(
+                                model=model,
+                                contents=prompt,
+                                config=config_base,
+                            )
+                        raw = _extract_gemini_text(resp)
+                    parsed = _parse_gemini_batch_json(raw, expected_len)
+                    _log_api_event(
+                        "gemini_batch_ok",
+                        model=model,
+                        batch_items=expected_len,
+                        via_relay=use_relay,
+                    )
+                    return parsed
                 except Exception as e:
                     err_msg = str(e)
                     err_lc = err_msg.lower()
+                    _log_api_event(
+                        "gemini_batch_error",
+                        model=model,
+                        batch_items=expected_len,
+                        attempt=attempt + 1,
+                        error=_short_error(err_msg),
+                        via_relay=use_relay,
+                    )
                     if "insufficient_quota" in err_lc or "quota" in err_lc:
                         raise HTTPException(
                             status_code=402,
@@ -1419,10 +2085,20 @@ def translate_segments(
                                 status_code=429,
                                 detail="Gemini 请求过于频繁（限流）。请稍后再试，或在 Google AI Studio / Gemini 控制台查看配额。",
                             ) from e
+                    if _is_auth_error(err_lc):
+                        raise HTTPException(
+                            status_code=401,
+                            detail="Gemini 鉴权失败：请检查 API Key 是否有效，以及项目权限是否正确。",
+                        ) from e
+                    if _is_model_error(err_lc):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Gemini 模型不可用：{model}。请确认模型名和账号可用区域。",
+                        ) from e
                     if attempt < 1:
                         time.sleep(2 ** (attempt + 1))
                     else:
-                        raise RuntimeError(f"Gemini 批量解析失败：{e!s}") from e
+                        raise RuntimeError(f"Gemini 批量调用失败：{_short_error(e)}") from e
             raise RuntimeError("Gemini 批量解析失败：未获取到有效返回")
 
         def _translate_batch_with_split(batch_meta: List[Tuple[int, dict, str]]) -> List[str]:
@@ -1431,10 +2107,25 @@ def translate_segments(
             texts = [x[2] for x in batch_meta]
             try:
                 return _call_gemini_batch(texts)
-            except RuntimeError:
+            except RuntimeError as e:
                 if len(batch_meta) == 1:
                     return [_single_translate(batch_meta[0][2])]
                 mid = len(batch_meta) // 2
+                err_text = _short_error(e, max_len=140)
+                is_size_error = _is_probably_batch_size_error(err_text)
+                if status_cb:
+                    if is_size_error:
+                        status_cb(f"当前批次可能过大，自动拆分为 {mid} + {len(batch_meta) - mid} 条重试…")
+                    else:
+                        status_cb(f"批量调用异常，自动拆分为 {mid} + {len(batch_meta) - mid} 条重试…")
+                _log_api_event(
+                    "gemini_batch_split",
+                    model=model,
+                    batch_items=len(batch_meta),
+                    reason=err_text,
+                    suspected_size=is_size_error,
+                    via_relay=use_relay,
+                )
                 left = _translate_batch_with_split(batch_meta[:mid])
                 right = _translate_batch_with_split(batch_meta[mid:])
                 return left + right
@@ -1468,6 +2159,58 @@ def translate_segments(
         return [x if x is not None else segments[i] for i, x in enumerate(out)]
 
     out = []
+    if api_name == "google":
+        target = _translator_target_code(target_lang)
+        translator = GoogleTranslator(
+            source=source_lang or "auto",
+            target=target,
+        )
+        batch_max_items = _resolve_batch_size(translation_batch_size, 20, max_value=100)
+        pending: List[Tuple[int, dict, str]] = []
+        done = 0
+        for idx, seg in enumerate(segments, 1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                out.append(seg)
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+                continue
+            pending.append((idx, seg, text))
+
+        pos = 0
+        while pos < len(pending):
+            if cancel_event and cancel_event.is_set():
+                raise JobCanceled("任务已取消")
+            batch_meta = pending[pos: pos + batch_max_items]
+            batch_texts = [x[2] for x in batch_meta]
+            pos += len(batch_meta)
+            try:
+                if hasattr(translator, "translate_batch"):
+                    translated_items = translator.translate_batch(batch_texts)
+                else:
+                    translated_items = [translator.translate(t) for t in batch_texts]
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"翻译失败（{api_name}）: {e!s}",
+                ) from e
+            if not isinstance(translated_items, list):
+                translated_items = [str(translated_items)]
+            if len(translated_items) != len(batch_meta):
+                raise HTTPException(
+                    status_code=500,
+                    detail="翻译失败（google）: 返回结果数量与请求不一致",
+                )
+            for (_, seg, src_text), translated in zip(batch_meta, translated_items):
+                out.append({**seg, "text": (translated or src_text)})
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+        return out
+
     for idx, seg in enumerate(segments, 1):
         if cancel_event and cancel_event.is_set():
             raise JobCanceled("任务已取消")
@@ -1477,26 +2220,7 @@ def translate_segments(
             if progress_cb:
                 progress_cb(idx, total)
             continue
-        try:
-            if api_name == "google":
-                target = _translator_target_code(target_lang)
-                translator = GoogleTranslator(
-                    source=source_lang or "auto",
-                    target=target,
-                )
-                translated = translator.translate(text)
-            elif api_name == "openai":
-                translated = text
-            elif api_name == "gemini":
-                translated = text
-            else:
-                translated = text
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"翻译失败（{api_name}）: {e!s}",
-            )
-        out.append({**seg, "text": translated})
+        out.append({**seg, "text": text})
         if progress_cb:
             progress_cb(idx, total)
     return out
@@ -1541,6 +2265,12 @@ async def list_gemini_models():
     return {"models": [{"id": i, "name": n} for i, n in GEMINI_TRANSLATE_MODELS]}
 
 
+@app.get("/api/moonshot_models")
+async def list_moonshot_models():
+    """列出可选的 Moonshot 翻译模型"""
+    return {"models": [{"id": i, "name": n} for i, n in MOONSHOT_TRANSLATE_MODELS]}
+
+
 @app.get("/api/ffmpeg/status")
 async def ffmpeg_status():
     """检测 ffmpeg 是否可用，以及来源（系统 / 应用内）。"""
@@ -1572,14 +2302,21 @@ async def transcribe_video(
     openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
+    openai_reasoning_effort: str = Form(""),
     gemini_api_key: str = Form(""),
+    gemini_base_url: str = Form(""),
     gemini_model: str = Form(""),
+    gemini_thinking_level: str = Form(""),
+    moonshot_api_key: str = Form(""),
+    moonshot_base_url: str = Form(""),
+    moonshot_model: str = Form(""),
     translation_rules: str = Form(""),
+    translation_batch_size: int = Form(0),
 ):
     """
     上传视频/音频，使用 Whisper 转写，可选翻译成另一语言，返回 SRT 文件。
     language: 识别语言；translate_to: 翻译目标语言（none 表示不翻译）；
-    translation_api: 翻译引擎（none / google / deepl / openai / gemini）。
+    translation_api: 翻译引擎（none / google / deepl / openai / gemini / moonshot）。
     """
     ext = get_extension(file.filename or "")
     if ext not in ALLOWED_EXTENSIONS:
@@ -1591,6 +2328,10 @@ async def transcribe_video(
         raise HTTPException(status_code=400, detail=f"不支持的模型: {model_name}")
     if engine not in TRANSCRIBE_ENGINES:
         raise HTTPException(status_code=400, detail=f"不支持的识别引擎: {engine}")
+    if translation_api and translation_api != "none" and (not translate_to or translate_to == "none"):
+        raise HTTPException(status_code=400, detail="已选择翻译 API，请同时选择“翻译成”目标语言")
+    if translate_to and translate_to != "none" and (not translation_api or translation_api == "none"):
+        raise HTTPException(status_code=400, detail="已选择“翻译成”目标语言，请同时选择翻译 API")
 
     available, _, path_or_error = check_ffmpeg_available()
     if not available:
@@ -1603,15 +2344,45 @@ async def transcribe_video(
     suffix = ext or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         content = await file.read()
+        uploaded_bytes = len(content)
         tmp.write(content)
         input_path = tmp.name
 
     base_name = Path(file.filename or "video").stem
-    out_suffix = _translated_suffix(translate_to, translation_api, openai_model, gemini_model) if (translate_to and translate_to != "none") else ""
+    out_suffix = _translated_suffix(
+        translate_to,
+        translation_api,
+        openai_model,
+        gemini_model,
+        moonshot_model,
+    ) if (translate_to and translate_to != "none") else ""
     filename = f"{base_name}{out_suffix}.srt"
     filename_original = f"{base_name}.srt" if (translate_to and translate_to != "none") else None
     job_id = str(uuid.uuid4())
     _init_job(job_id, filename, filename_original=filename_original)
+    _log_api_event(
+        "transcribe_submit",
+        job_id=job_id,
+        filename=file.filename or "",
+        uploaded_bytes=uploaded_bytes,
+        engine=engine,
+        model_name=model_name,
+        language=language,
+        translation_api=translation_api,
+        translate_to=translate_to,
+        openai_model=openai_model,
+        openai_reasoning_effort=openai_reasoning_effort,
+        gemini_base_url=gemini_base_url,
+        gemini_model=gemini_model,
+        gemini_thinking_level=gemini_thinking_level,
+        moonshot_model=moonshot_model,
+        translation_batch_size=translation_batch_size,
+        has_translation_rules=bool((translation_rules or "").strip()),
+        has_openai_api_key=bool((openai_api_key or "").strip()),
+        has_gemini_api_key=bool((gemini_api_key or "").strip()),
+        has_moonshot_api_key=bool((moonshot_api_key or "").strip()),
+        has_deepl_api_key=bool((deepl_api_key or "").strip()),
+    )
 
     thread = threading.Thread(
         target=_process_job,
@@ -1627,9 +2398,16 @@ async def transcribe_video(
             openai_base_url,
             deepl_api_key,
             openai_model,
+            openai_reasoning_effort,
             gemini_api_key,
+            gemini_base_url,
             gemini_model,
+            gemini_thinking_level,
+            moonshot_api_key,
+            moonshot_base_url,
+            moonshot_model,
             translation_rules,
+            translation_batch_size,
             base_name,
         ),
         daemon=True,
@@ -1648,9 +2426,16 @@ async def translate_only(
     openai_base_url: str = Form(""),
     deepl_api_key: str = Form(""),
     openai_model: str = Form(""),
+    openai_reasoning_effort: str = Form(""),
     gemini_api_key: str = Form(""),
+    gemini_base_url: str = Form(""),
     gemini_model: str = Form(""),
+    gemini_thinking_level: str = Form(""),
+    moonshot_api_key: str = Form(""),
+    moonshot_base_url: str = Form(""),
+    moonshot_model: str = Form(""),
     translation_rules: str = Form(""),
+    translation_batch_size: int = Form(0),
 ):
     """
     仅翻译：上传 .srt 字幕文件，翻译成目标语言后返回新 SRT。不进行语音转写。
@@ -1665,14 +2450,41 @@ async def translate_only(
 
     with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".srt") as tmp:
         content = await file.read()
+        uploaded_bytes = len(content)
         tmp.write(content)
         srt_path = tmp.name
 
     base_name = Path(file.filename or "subtitle").stem
-    out_suffix = _translated_suffix(translate_to, translation_api, openai_model, gemini_model)
+    out_suffix = _translated_suffix(
+        translate_to,
+        translation_api,
+        openai_model,
+        gemini_model,
+        moonshot_model,
+    )
     filename = f"{base_name}{out_suffix}.srt"
     job_id = str(uuid.uuid4())
     _init_job(job_id, filename)
+    _log_api_event(
+        "translate_submit",
+        job_id=job_id,
+        filename=file.filename or "",
+        uploaded_bytes=uploaded_bytes,
+        translation_api=translation_api,
+        translate_to=translate_to,
+        openai_model=openai_model,
+        openai_reasoning_effort=openai_reasoning_effort,
+        gemini_base_url=gemini_base_url,
+        gemini_model=gemini_model,
+        gemini_thinking_level=gemini_thinking_level,
+        moonshot_model=moonshot_model,
+        translation_batch_size=translation_batch_size,
+        has_translation_rules=bool((translation_rules or "").strip()),
+        has_openai_api_key=bool((openai_api_key or "").strip()),
+        has_gemini_api_key=bool((gemini_api_key or "").strip()),
+        has_moonshot_api_key=bool((moonshot_api_key or "").strip()),
+        has_deepl_api_key=bool((deepl_api_key or "").strip()),
+    )
 
     thread = threading.Thread(
         target=_process_translate_only_job,
@@ -1685,9 +2497,16 @@ async def translate_only(
             openai_base_url,
             deepl_api_key,
             openai_model,
+            openai_reasoning_effort,
             gemini_api_key,
+            gemini_base_url,
             gemini_model,
+            gemini_thinking_level,
+            moonshot_api_key,
+            moonshot_base_url,
+            moonshot_model,
             translation_rules,
+            translation_batch_size,
             base_name,
         ),
         daemon=True,

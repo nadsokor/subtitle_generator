@@ -11,12 +11,19 @@
 - **语言**：支持指定字幕语言或自动检测
 - **翻译**：可选将字幕翻译成另一种语言
   - **Google 翻译**：免密钥
-  - **DeepL**、**OpenAI**、**Gemini**：需在页面或环境变量中配置 API Key
-  - **OpenAI / Gemini** 支持选择模型及「自定义」输入模型名
-  - **批量翻译**：DeepL / OpenAI / Gemini 会自动分批请求，减少请求次数并提升效率
-  - **翻译风格与规则**：可选填写说明（OpenAI / Gemini 生效），如语气、专有名词保留等
+  - **DeepL**、**OpenAI**、**Gemini**、**Moonshot**：需在页面或环境变量中配置 API Key
+  - **OpenAI / Gemini / Moonshot** 支持选择模型及「自定义」输入模型名
+  - **OpenAI Reasoning Effort**：可选配置 `minimal / low / medium / high`
+  - **Gemini Thinking Level**：可选配置 `MINIMAL / LOW / MEDIUM / HIGH`
+  - **Gemini Base URL（可选）**：支持接入兼容 Gemini 原生 `v1beta` 路径的中转站（如 `/v1beta/models/{model}:generateContent`）
+  - **批量翻译**：Google / DeepL / OpenAI / Gemini / Moonshot 会自动分批请求，减少请求次数并提升效率
+  - **每批条数可配置**：可在页面中自定义「每批条数」（留空用默认），按所选翻译 API 生效
+  - **多文件并行翻译**：在 OpenAI / Gemini 下可并行处理多个文件，默认并行数为 3（可调整）
+  - **翻译风格与规则**：可选填写说明（OpenAI / Gemini / Moonshot 生效），如语气、专有名词保留等
 - **ffmpeg 集成**：若未检测到系统 ffmpeg，可在页面「一键下载并安装」到应用目录，无需手动配置 PATH
 - **任务进度**：网页端展示下载模型、转写、翻译的进度条与预计剩余时间
+- **并行任务明细面板**：多文件并行时实时展示每个文件的排队/运行/完成/失败状态与进度
+- **API 请求日志**：自动写入 `logs/api_requests.log`，包含请求路径、状态码、耗时及关键提交参数（敏感字段脱敏）
 
 ## 环境要求
 
@@ -73,11 +80,16 @@ uvicorn app:app --host 0.0.0.0 --port 8765
    - **识别引擎**：可选 Whisper 原版、faster-whisper（更快）或 Purfview XXL（exe）
 4. 选择 **字幕语言**：若已知语种可指定，否则选「自动检测」
 5. （可选）**翻译**：
-   - 在「翻译 API」中选 Google / DeepL / OpenAI / Gemini，在「翻译成」中选目标语言
-   - 选 OpenAI 或 Gemini 时可在「API 配置」中填写 API Key、选择模型（含「自定义」输入模型名），以及「翻译风格与规则」
+   - 在「翻译 API」中选 Google / DeepL / OpenAI / Gemini / Moonshot，在「翻译成」中选目标语言
+   - 选 OpenAI / Gemini / Moonshot 时可在「API 配置」中填写 API Key、选择模型（含「自定义」输入模型名），以及「翻译风格与规则」
+   - 选 OpenAI 时可额外设置 Reasoning Effort（`minimal / low / medium / high`，留空为默认）
+   - 选 Gemini 时可额外设置 Thinking Level（`MINIMAL / LOW / MEDIUM / HIGH`，留空为默认）
    - 选 DeepL 时填写 DeepL API Key；配置会保存在浏览器本地，下次自动带出
+   - 可在「每批条数」中设置批量请求的每批字幕条数（如 8/12/20）；不填则使用默认值
+   - 可在「并行文件数」中设置 OpenAI / Gemini 的多文件并发数（默认 3，建议 1~5）
 6. 点击 **「生成字幕」**，等待任务完成（页面会显示进度条与预计剩余时间）
 7. 完成后会自动下载 `.srt` 文件（若启用了翻译，文件名为 `原名.语言码.srt`，如 `demo.zh.srt`）
+8. 若需排查问题，可查看 `logs/api_requests.log`（自动轮转清理历史）
 
 ### 翻译 API 说明
 
@@ -85,6 +97,9 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 - **DeepL**：在 [DeepL 开发者](https://www.deepl.com/pro-api) 获取 API Key，在页面「翻译」→ 选 DeepL 后出现的输入框中填写，或设置环境变量 `DEEPL_API_KEY` / `DEEPL_AUTH_KEY`
 - **OpenAI**：在 [OpenAI API](https://platform.openai.com/api-keys) 创建 Key，在页面填写或设置 `OPENAI_API_KEY`；可选环境变量 `OPENAI_TRANSLATE_MODEL` 指定默认模型
 - **Gemini**：在 [Gemini API](https://ai.google.dev/gemini-api/docs/api-key) 创建 Key，在页面填写或设置 `GEMINI_API_KEY`；可选环境变量 `GEMINI_TRANSLATE_MODEL` 指定默认模型
+  - 若通过中转站访问 Gemini，可在页面填写 `Gemini Base URL`，或设置环境变量 `GEMINI_BASE_URL`（示例：`https://your-relay.example.com`）
+  - 中转站需兼容 Gemini 原生接口路径 `/v1beta/models/{model}:generateContent`，并支持 `Authorization: Bearer <token>` 认证
+- **Moonshot**：在 [Moonshot 平台](https://platform.moonshot.cn/docs/overview) 获取 API Key，在页面填写或设置 `MOONSHOT_API_KEY`；可选 `MOONSHOT_BASE_URL`（默认 `https://api.moonshot.cn/v1`）与 `MOONSHOT_TRANSLATE_MODEL`（默认 `kimi-k2-turbo-preview`，`kimi-k2.5` 会自动适配 `temperature=1`）
 
 ## 项目结构
 
@@ -95,9 +110,20 @@ auto_subbed/
 ├── README.md
 ├── .gitignore
 ├── .ffmpeg/            # 可选，一键安装的 ffmpeg 所在目录（按平台分目录）
+├── logs/               # 运行日志目录（自动创建，按大小轮转并清理历史）
 └── static/
     └── index.html      # 前端页面
 ```
+
+## 日志与排查
+
+- 默认日志文件：`logs/api_requests.log`
+- 日志内容：`/api/*` 请求起止、状态码、耗时、客户端信息，以及 `/api/transcribe`、`/api/translate` 的关键业务参数
+- 敏感字段（如 API Key）会自动脱敏，不会记录明文
+- 轮转策略：按文件大小滚动，超出后自动生成历史文件并按保留份数删除旧日志
+- 可通过环境变量调整：
+  - `AUTO_SUBBED_API_LOG_MAX_BYTES`：单个日志文件最大字节数（默认 `10485760`，即 10MB）
+  - `AUTO_SUBBED_API_LOG_BACKUP_COUNT`：保留历史日志份数（默认 `10`）
 
 ## Windows 常见问题
 
@@ -127,7 +153,7 @@ auto_subbed/
 
 ## 技术说明
 
-- **后端**：FastAPI + OpenAI Whisper（`openai-whisper`）+ 翻译（`deep-translator`：Google，`deepl`：DeepL，`openai`：OpenAI Chat Completions，`google-genai`：Gemini）
+- **后端**：FastAPI + OpenAI Whisper（`openai-whisper`）+ 翻译（`deep-translator`：Google，`deepl`：DeepL，`openai`：OpenAI/Moonshot Chat Completions，`google-genai`：Gemini）
 - **Purfview XXL（可选）**：将 `faster-whisper-xxl.exe` 放到 `app.py` 同级的 `.models/purfview-xxl/`，选择引擎为 `Purfview XXL（exe）` 即可调用
 - **前端**：单页 HTML + 原生 JS，无构建步骤；配置与 API Key 使用 localStorage 持久化
 - **ffmpeg**：优先使用系统 PATH；若无则从 BtbN（Windows/Linux）或 evermeet（macOS）下载并解压到 `.ffmpeg/<平台>`，仅当前进程 PATH 生效

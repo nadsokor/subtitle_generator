@@ -216,6 +216,100 @@
       font-size: 0.8rem;
       color: var(--muted);
     }
+    .parallel-detail-panel {
+      margin-top: 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+      overflow: hidden;
+    }
+    .parallel-detail-title {
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .parallel-detail-list {
+      max-height: 250px;
+      overflow: auto;
+    }
+    .parallel-detail-item {
+      padding: 0.58rem 0.75rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .parallel-detail-item:last-child {
+      border-bottom: none;
+    }
+    .parallel-detail-top {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-width: 0;
+    }
+    .parallel-detail-index {
+      color: var(--muted);
+      font-size: 0.78rem;
+      flex: 0 0 auto;
+    }
+    .parallel-detail-file {
+      font-size: 0.84rem;
+      flex: 1 1 auto;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .parallel-detail-badge {
+      flex: 0 0 auto;
+      font-size: 0.75rem;
+      border-radius: 999px;
+      padding: 0.1rem 0.45rem;
+      border: 1px solid transparent;
+    }
+    .parallel-detail-badge.queued {
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .parallel-detail-badge.running {
+      color: var(--accent);
+      border-color: rgba(167, 139, 250, 0.45);
+      background: rgba(167, 139, 250, 0.12);
+    }
+    .parallel-detail-badge.done {
+      color: var(--success);
+      border-color: rgba(52, 211, 153, 0.45);
+      background: rgba(52, 211, 153, 0.1);
+    }
+    .parallel-detail-badge.fail {
+      color: var(--error);
+      border-color: rgba(248, 113, 113, 0.45);
+      background: rgba(248, 113, 113, 0.12);
+    }
+    .parallel-detail-badge.canceled {
+      color: #fbbf24;
+      border-color: rgba(251, 191, 36, 0.45);
+      background: rgba(251, 191, 36, 0.12);
+    }
+    .parallel-detail-sub {
+      margin-top: 0.25rem;
+      display: flex;
+      gap: 0.55rem;
+      align-items: baseline;
+      color: var(--muted);
+      min-width: 0;
+    }
+    .parallel-detail-progress {
+      flex: 0 0 auto;
+      font-size: 0.78rem;
+    }
+    .parallel-detail-message {
+      flex: 1 1 auto;
+      font-size: 0.78rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .ffmpeg-banner {
       background: rgba(248, 113, 113, 0.12);
       border: 1px solid var(--error);
@@ -346,6 +440,7 @@
             <option value="deepl">DeepL</option>
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>
+            <option value="moonshot">Moonshot</option>
           </select>
         </div>
         <div class="field">
@@ -398,11 +493,25 @@
           <label for="openaiModelCustom">自定义模型名</label>
           <input type="text" id="openaiModelCustom" placeholder="例如：gpt-5.2 或 gpt-5mini" autocomplete="off" />
         </div>
+        <div class="field">
+          <label for="openaiReasoningEffort">OpenAI Reasoning Effort（可选）</label>
+          <select id="openaiReasoningEffort">
+            <option value="" selected>默认</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </div>
       </div>
       <div id="apiConfigGemini" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
           <label for="geminiApiKey">Gemini API Key</label>
           <input type="password" id="geminiApiKey" placeholder="AIza..." autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="geminiBaseUrl">Gemini Base URL（可选，中转站）</label>
+          <input type="text" id="geminiBaseUrl" placeholder="例如：https://your-relay.example.com" autocomplete="off" />
         </div>
         <div class="field">
           <label for="geminiModel">Gemini 翻译模型</label>
@@ -417,6 +526,10 @@
           <label for="geminiModelCustom">自定义模型名</label>
           <input type="text" id="geminiModelCustom" placeholder="例如：gemini-2.5-flash-lite" autocomplete="off" />
         </div>
+        <div class="field">
+          <label for="geminiThinkingLevel">Gemini Thinking Level（可选）</label>
+          <input type="text" id="geminiThinkingLevel" placeholder="例如：MINIMAL / LOW / MEDIUM / HIGH，留空默认" autocomplete="off" />
+        </div>
       </div>
       <div id="apiConfigDeepl" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
@@ -424,10 +537,48 @@
           <input type="password" id="deeplApiKey" placeholder="留空则使用环境变量" autocomplete="off" />
         </div>
       </div>
+      <div id="apiConfigMoonshot" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+        <div class="field">
+          <label for="moonshotApiKey">Moonshot API Key</label>
+          <input type="password" id="moonshotApiKey" placeholder="sk-..." autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="moonshotBaseUrl">Moonshot Base URL（可选）</label>
+          <input type="text" id="moonshotBaseUrl" placeholder="默认：https://api.moonshot.cn/v1" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="moonshotModel">Moonshot 翻译模型</label>
+          <select id="moonshotModel">
+            <option value="custom">自定义…</option>
+            <option value="kimi-k2-turbo-preview" selected>kimi-k2-turbo-preview（推荐）</option>
+            <option value="kimi-k2-thinking-turbo">kimi-k2-thinking-turbo</option>
+            <option value="kimi-k2-0905-preview">kimi-k2-0905-preview</option>
+            <option value="moonshot-v1-8k">moonshot-v1-8k</option>
+            <option value="moonshot-v1-32k">moonshot-v1-32k</option>
+            <option value="moonshot-v1-128k">moonshot-v1-128k</option>
+          </select>
+        </div>
+        <div class="field" id="moonshotModelCustomWrap" style="display: none;">
+          <label for="moonshotModelCustom">自定义模型名</label>
+          <input type="text" id="moonshotModelCustom" placeholder="例如：kimi-k2" autocomplete="off" />
+        </div>
+      </div>
+      <div id="apiConfigBatch" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+        <div class="field">
+          <label for="translationBatchSize">每批条数（可选）</label>
+          <input type="text" id="translationBatchSize" inputmode="numeric" pattern="[0-9]*" placeholder="留空则使用默认值" autocomplete="off" />
+          <div class="hint" style="margin-top: 0.35rem;">Google / DeepL / OpenAI / Gemini / Moonshot 翻译时生效</div>
+        </div>
+        <div class="field">
+          <label for="parallelFileCount">并行文件数（仅 OpenAI / Gemini，默认 3）</label>
+          <input type="text" id="parallelFileCount" inputmode="numeric" pattern="[0-9]*" value="3" autocomplete="off" />
+          <div class="hint" style="margin-top: 0.35rem;">仅多文件任务生效；建议 1~5，默认 3</div>
+        </div>
+      </div>
       <div id="apiConfigRules" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
           <label for="translationRules">翻译风格与规则（可选）</label>
-          <textarea id="translationRules" rows="3" placeholder="例如：使用正式语气；品牌名、专有名词保留英文；译成简体中文口语化表达。仅 OpenAI / Gemini 翻译时生效。" style="width:100%;padding:0.6rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.9rem;resize:vertical;font-family:inherit;"></textarea>
+          <textarea id="translationRules" rows="3" placeholder="例如：使用正式语气；品牌名、专有名词保留英文；译成简体中文口语化表达。仅 OpenAI / Gemini / Moonshot 翻译时生效。" style="width:100%;padding:0.6rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.9rem;resize:vertical;font-family:inherit;"></textarea>
         </div>
       </div>
     </div>
@@ -438,6 +589,10 @@
         <button type="button" class="btn" id="cancelBtn" disabled>终止任务</button>
       </div>
       <div class="status" id="status"></div>
+      <div class="parallel-detail-panel" id="parallelDetailPanel" style="display: none;">
+        <div class="parallel-detail-title">并行任务明细</div>
+        <div class="parallel-detail-list" id="parallelDetailList"></div>
+      </div>
       <div class="hint" id="downloadList" style="margin-top: 0.6rem;"></div>
       <div class="progress-bar-wrap" id="progressBarWrap" style="display: none;">
         <div class="progress-bar-fill" id="progressBarFill"></div>
@@ -449,7 +604,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.6";
+    const APP_VERSION = "1.12";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -465,19 +620,33 @@
     const openaiModel = document.getElementById("openaiModel");
     const openaiModelCustom = document.getElementById("openaiModelCustom");
     const openaiModelCustomWrap = document.getElementById("openaiModelCustomWrap");
+    const openaiReasoningEffort = document.getElementById("openaiReasoningEffort");
     const geminiApiKey = document.getElementById("geminiApiKey");
     const geminiModel = document.getElementById("geminiModel");
     const geminiModelCustom = document.getElementById("geminiModelCustom");
     const geminiModelCustomWrap = document.getElementById("geminiModelCustomWrap");
+    const geminiThinkingLevel = document.getElementById("geminiThinkingLevel");
+    const geminiBaseUrl = document.getElementById("geminiBaseUrl");
+    const moonshotApiKey = document.getElementById("moonshotApiKey");
+    const moonshotBaseUrl = document.getElementById("moonshotBaseUrl");
+    const moonshotModel = document.getElementById("moonshotModel");
+    const moonshotModelCustom = document.getElementById("moonshotModelCustom");
+    const moonshotModelCustomWrap = document.getElementById("moonshotModelCustomWrap");
     const deeplApiKey = document.getElementById("deeplApiKey");
     const apiConfigOpenai = document.getElementById("apiConfigOpenai");
     const apiConfigGemini = document.getElementById("apiConfigGemini");
     const apiConfigDeepl = document.getElementById("apiConfigDeepl");
+    const apiConfigMoonshot = document.getElementById("apiConfigMoonshot");
+    const apiConfigBatch = document.getElementById("apiConfigBatch");
     const apiConfigRules = document.getElementById("apiConfigRules");
+    const translationBatchSize = document.getElementById("translationBatchSize");
+    const parallelFileCount = document.getElementById("parallelFileCount");
     const translationRules = document.getElementById("translationRules");
     const submitBtn = document.getElementById("submitBtn");
     const cancelBtn = document.getElementById("cancelBtn");
     const statusEl = document.getElementById("status");
+    const parallelDetailPanel = document.getElementById("parallelDetailPanel");
+    const parallelDetailList = document.getElementById("parallelDetailList");
     const downloadList = document.getElementById("downloadList");
     const progressBarWrap = document.getElementById("progressBarWrap");
     const progressBarFill = document.getElementById("progressBarFill");
@@ -495,9 +664,14 @@
 
     const STORAGE_KEY = "auto_subbed_api_config";
     const SETTINGS_KEY = "auto_subbed_settings";
-    let currentJobId = null;
+    const activeJobIds = new Set();
+    const parallelTaskStates = new Map();
     let selectedFiles = [];
     let stopQueue = false;
+    let parallelRunEnabled = false;
+    let parallelTotalFiles = 0;
+    let parallelFileNames = [];
+    let autoDownloadChain = Promise.resolve();
 
     function updateModeUI() {
       const onlyTranslate = workMode.value === "translate_only";
@@ -529,7 +703,13 @@
       selectedFiles = [];
       submitBtn.disabled = true;
       cancelBtn.disabled = true;
-      currentJobId = null;
+      activeJobIds.clear();
+      parallelTaskStates.clear();
+      parallelRunEnabled = false;
+      parallelTotalFiles = 0;
+      parallelFileNames = [];
+      parallelDetailList.innerHTML = "";
+      parallelDetailPanel.style.display = "none";
     }
     async function checkFfmpegAndShowBanner() {
       try {
@@ -567,15 +747,26 @@
 
     cancelBtn.addEventListener("click", async () => {
       stopQueue = true;
-      if (!currentJobId) {
+      if (!activeJobIds.size) {
         showStatus("已停止队列", "success");
         cancelBtn.disabled = true;
         return;
       }
       cancelBtn.disabled = true;
       try {
-        await fetch(`/api/jobs/${currentJobId}/cancel`, { method: "POST" });
-        showStatus("已请求终止当前任务，并停止后续队列", "success");
+        const ids = Array.from(activeJobIds);
+        await Promise.all(ids.map((id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" }).catch(() => null)));
+        if (parallelRunEnabled && parallelTotalFiles > 0) {
+          for (let i = 1; i <= parallelTotalFiles; i++) {
+            const state = parallelTaskStates.get(i) || { fileName: parallelFileNames[i - 1] || `文件 ${i}` };
+            if (state.status !== "done" && state.status !== "fail" && state.status !== "canceled") {
+              parallelTaskStates.set(i, { ...state, status: "canceled", message: "已停止", progress: Number.isFinite(state.progress) ? state.progress : 0 });
+            }
+          }
+          renderParallelStatus();
+          renderParallelDetails();
+        }
+        showStatus(`已请求终止 ${ids.length} 个运行中任务，并停止后续队列`, "success");
       } catch (_) {
         showStatus("终止任务请求失败", "error");
       }
@@ -590,10 +781,18 @@
         if (data.openai_base_url) openaiBaseUrl.value = data.openai_base_url;
         if (data.openai_model) openaiModel.value = data.openai_model;
         if (data.openai_model_custom) openaiModelCustom.value = data.openai_model_custom;
+        if (data.openai_reasoning_effort != null) openaiReasoningEffort.value = data.openai_reasoning_effort;
         if (data.gemini_api_key) geminiApiKey.value = data.gemini_api_key;
+        if (data.gemini_base_url) geminiBaseUrl.value = data.gemini_base_url;
         if (data.gemini_model) geminiModel.value = data.gemini_model;
         if (data.gemini_model_custom) geminiModelCustom.value = data.gemini_model_custom;
+        if (data.gemini_thinking_level) geminiThinkingLevel.value = data.gemini_thinking_level;
+        if (data.moonshot_api_key) moonshotApiKey.value = data.moonshot_api_key;
+        if (data.moonshot_base_url) moonshotBaseUrl.value = data.moonshot_base_url;
+        if (data.moonshot_model) moonshotModel.value = data.moonshot_model;
+        if (data.moonshot_model_custom) moonshotModelCustom.value = data.moonshot_model_custom;
         if (data.deepl_api_key) deeplApiKey.value = data.deepl_api_key;
+        if (data.translation_batch_size) translationBatchSize.value = data.translation_batch_size;
         if (data.translation_rules != null) translationRules.value = data.translation_rules;
       } catch (_) {}
     }
@@ -609,6 +808,7 @@
         if (data.language) language.value = data.language;
         if (data.translation_api) translationApi.value = data.translation_api;
         if (data.translate_to) translateTo.value = data.translate_to;
+        if (data.parallel_file_count) parallelFileCount.value = data.parallel_file_count;
       } catch (_) {}
     }
 
@@ -621,6 +821,7 @@
           language: language.value,
           translation_api: translationApi.value,
           translate_to: translateTo.value,
+          parallel_file_count: parallelFileCount.value.trim(),
         };
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
       } catch (_) {}
@@ -633,10 +834,18 @@
           openai_base_url: openaiBaseUrl.value.trim(),
           openai_model: openaiModel.value,
           openai_model_custom: openaiModelCustom.value.trim(),
+          openai_reasoning_effort: openaiReasoningEffort.value,
           gemini_api_key: geminiApiKey.value.trim(),
+          gemini_base_url: geminiBaseUrl.value.trim(),
           gemini_model: geminiModel.value,
           gemini_model_custom: geminiModelCustom.value.trim(),
+          gemini_thinking_level: geminiThinkingLevel.value.trim(),
+          moonshot_api_key: moonshotApiKey.value.trim(),
+          moonshot_base_url: moonshotBaseUrl.value.trim(),
+          moonshot_model: moonshotModel.value,
+          moonshot_model_custom: moonshotModelCustom.value.trim(),
           deepl_api_key: deeplApiKey.value.trim(),
+          translation_batch_size: translationBatchSize.value.trim(),
           translation_rules: translationRules.value,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -647,7 +856,9 @@
       apiConfigOpenai.style.display = api === "openai" ? "block" : "none";
       apiConfigGemini.style.display = api === "gemini" ? "block" : "none";
       apiConfigDeepl.style.display = api === "deepl" ? "block" : "none";
-      apiConfigRules.style.display = (api === "openai" || api === "gemini") ? "block" : "none";
+      apiConfigMoonshot.style.display = api === "moonshot" ? "block" : "none";
+      apiConfigBatch.style.display = api !== "none" ? "block" : "none";
+      apiConfigRules.style.display = (api === "openai" || api === "gemini" || api === "moonshot") ? "block" : "none";
     }
 
     loadApiConfig();
@@ -663,6 +874,11 @@
       openaiModelCustomWrap.style.display = openaiModel.value === "custom" ? "block" : "none";
       saveApiConfig();
     });
+    moonshotModelCustomWrap.style.display = moonshotModel.value === "custom" ? "block" : "none";
+    moonshotModel.addEventListener("change", () => {
+      moonshotModelCustomWrap.style.display = moonshotModel.value === "custom" ? "block" : "none";
+      saveApiConfig();
+    });
     geminiModelCustomWrap.style.display = geminiModel.value === "custom" ? "block" : "none";
     geminiModel.addEventListener("change", () => {
       geminiModelCustomWrap.style.display = geminiModel.value === "custom" ? "block" : "none";
@@ -676,19 +892,34 @@
     model.addEventListener("change", saveSettings);
     language.addEventListener("change", saveSettings);
     translateTo.addEventListener("change", saveSettings);
+    parallelFileCount.addEventListener("change", saveSettings);
+    parallelFileCount.addEventListener("blur", saveSettings);
 
     openaiApiKey.addEventListener("change", saveApiConfig);
     openaiApiKey.addEventListener("blur", saveApiConfig);
     openaiBaseUrl.addEventListener("change", saveApiConfig);
     openaiBaseUrl.addEventListener("blur", saveApiConfig);
+    openaiReasoningEffort.addEventListener("change", saveApiConfig);
     openaiModelCustom.addEventListener("change", saveApiConfig);
     openaiModelCustom.addEventListener("blur", saveApiConfig);
     geminiApiKey.addEventListener("change", saveApiConfig);
     geminiApiKey.addEventListener("blur", saveApiConfig);
+    geminiBaseUrl.addEventListener("change", saveApiConfig);
+    geminiBaseUrl.addEventListener("blur", saveApiConfig);
     geminiModelCustom.addEventListener("change", saveApiConfig);
     geminiModelCustom.addEventListener("blur", saveApiConfig);
+    geminiThinkingLevel.addEventListener("change", saveApiConfig);
+    geminiThinkingLevel.addEventListener("blur", saveApiConfig);
+    moonshotApiKey.addEventListener("change", saveApiConfig);
+    moonshotApiKey.addEventListener("blur", saveApiConfig);
+    moonshotBaseUrl.addEventListener("change", saveApiConfig);
+    moonshotBaseUrl.addEventListener("blur", saveApiConfig);
+    moonshotModelCustom.addEventListener("change", saveApiConfig);
+    moonshotModelCustom.addEventListener("blur", saveApiConfig);
     deeplApiKey.addEventListener("change", saveApiConfig);
     deeplApiKey.addEventListener("blur", saveApiConfig);
+    translationBatchSize.addEventListener("change", saveApiConfig);
+    translationBatchSize.addEventListener("blur", saveApiConfig);
     translationRules.addEventListener("change", saveApiConfig);
     translationRules.addEventListener("blur", saveApiConfig);
 
@@ -701,6 +932,103 @@
       progressBarWrap.style.display = "none";
       progressEta.textContent = "";
       downloadList.innerHTML = "";
+      parallelDetailList.innerHTML = "";
+      parallelDetailPanel.style.display = "none";
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;",
+      })[ch] || ch);
+    }
+
+    function getParallelStatusMeta(status) {
+      if (status === "running") return { label: "执行中", cls: "running" };
+      if (status === "done") return { label: "完成", cls: "done" };
+      if (status === "fail") return { label: "失败", cls: "fail" };
+      if (status === "canceled") return { label: "已停止", cls: "canceled" };
+      return { label: "排队中", cls: "queued" };
+    }
+
+    function renderParallelDetails() {
+      if (!parallelRunEnabled || parallelTotalFiles <= 1) {
+        parallelDetailList.innerHTML = "";
+        parallelDetailPanel.style.display = "none";
+        return;
+      }
+      const rows = [];
+      for (let i = 1; i <= parallelTotalFiles; i++) {
+        const state = parallelTaskStates.get(i) || {};
+        const status = state.status || "queued";
+        const fileLabel = state.fileName || parallelFileNames[i - 1] || `文件 ${i}`;
+        const progress = Number.isFinite(state.progress) ? Math.max(0, Math.min(100, Math.round(state.progress))) : 0;
+        const message = state.message || (status === "queued" ? "等待调度…" : "");
+        const meta = getParallelStatusMeta(status);
+        rows.push(
+          `<div class="parallel-detail-item">` +
+          `<div class="parallel-detail-top">` +
+          `<span class="parallel-detail-index">#${i}</span>` +
+          `<span class="parallel-detail-file">${escapeHtml(fileLabel)}</span>` +
+          `<span class="parallel-detail-badge ${meta.cls}">${meta.label}</span>` +
+          `</div>` +
+          `<div class="parallel-detail-sub">` +
+          `<span class="parallel-detail-progress">${progress}%</span>` +
+          `<span class="parallel-detail-message">${escapeHtml(message)}</span>` +
+          `</div>` +
+          `</div>`
+        );
+      }
+      parallelDetailList.innerHTML = rows.join("");
+      parallelDetailPanel.style.display = "block";
+    }
+
+    function queueAutoDownload(url, filename) {
+      autoDownloadChain = autoDownloadChain.then(async () => {
+        try {
+          await triggerDownload(url, filename);
+        } catch (_) {
+          // 自动下载可能被浏览器拦截，保留可点击链接
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      });
+      return autoDownloadChain;
+    }
+
+    function renderParallelStatus() {
+      if (!parallelRunEnabled || parallelTotalFiles <= 0) return;
+      let done = 0;
+      let fail = 0;
+      let canceled = 0;
+      let running = 0;
+      let progressSum = 0;
+      for (let i = 1; i <= parallelTotalFiles; i++) {
+        const s = parallelTaskStates.get(i);
+        if (!s) continue;
+        const p = Number.isFinite(s.progress) ? Math.max(0, Math.min(100, s.progress)) : 0;
+        progressSum += p;
+        if (s.status === "done") done += 1;
+        else if (s.status === "fail") fail += 1;
+        else if (s.status === "canceled") canceled += 1;
+        else if (s.status === "running") running += 1;
+      }
+      const queued = Math.max(0, parallelTotalFiles - done - fail - canceled - running);
+      const overall = Math.round(progressSum / parallelTotalFiles);
+      showProgress(overall, null);
+      const msg = `并行执行中：运行 ${running}，排队 ${queued}，完成 ${done}，失败 ${fail}，停止 ${canceled}`;
+      const type = running > 0 ? "loading" : (fail > 0 ? "error" : "success");
+      showStatus(running > 0 ? `<span class="spinner"></span>${msg}` : msg, type);
+    }
+
+    function setParallelTaskState(index, patch) {
+      if (!parallelRunEnabled) return;
+      const prev = parallelTaskStates.get(index) || {};
+      parallelTaskStates.set(index, { ...prev, ...patch });
+      renderParallelStatus();
+      renderParallelDetails();
     }
 
     async function triggerDownload(url, preferredName) {
@@ -777,6 +1105,12 @@
       hideStatus();
     }
 
+    function getParallelFileCount() {
+      const n = parseInt(parallelFileCount.value, 10);
+      if (!Number.isFinite(n) || n <= 0) return 3;
+      return Math.min(8, n);
+    }
+
     async function runSingleFileTask(file, onlyTranslate, queueIndex, queueTotal, batchMode) {
       const form = new FormData();
       form.append("file", file);
@@ -784,7 +1118,12 @@
       form.append("translate_to", translateTo.value);
       if (openaiApiKey.value.trim()) form.append("openai_api_key", openaiApiKey.value.trim());
       if (openaiBaseUrl.value.trim()) form.append("openai_base_url", openaiBaseUrl.value.trim());
+      if (openaiReasoningEffort.value) form.append("openai_reasoning_effort", openaiReasoningEffort.value);
       if (geminiApiKey.value.trim()) form.append("gemini_api_key", geminiApiKey.value.trim());
+      if (geminiBaseUrl.value.trim()) form.append("gemini_base_url", geminiBaseUrl.value.trim());
+      if (geminiThinkingLevel.value.trim()) form.append("gemini_thinking_level", geminiThinkingLevel.value.trim());
+      if (moonshotApiKey.value.trim()) form.append("moonshot_api_key", moonshotApiKey.value.trim());
+      if (moonshotBaseUrl.value.trim()) form.append("moonshot_base_url", moonshotBaseUrl.value.trim());
       if (deeplApiKey.value.trim()) form.append("deepl_api_key", deeplApiKey.value.trim());
       const selectedOpenaiModel = openaiModel.value === "custom"
         ? (openaiModelCustom.value.trim() || "gpt-4o-mini")
@@ -792,8 +1131,16 @@
       const selectedGeminiModel = geminiModel.value === "custom"
         ? (geminiModelCustom.value.trim() || "gemini-2.5-flash")
         : geminiModel.value;
+      const selectedMoonshotModel = moonshotModel.value === "custom"
+        ? (moonshotModelCustom.value.trim() || "kimi-k2-turbo-preview")
+        : moonshotModel.value;
       form.append("openai_model", selectedOpenaiModel);
       form.append("gemini_model", selectedGeminiModel);
+      form.append("moonshot_model", selectedMoonshotModel);
+      const batchSize = parseInt(translationBatchSize.value, 10);
+      if (Number.isFinite(batchSize) && batchSize > 0) {
+        form.append("translation_batch_size", String(batchSize));
+      }
       if (translationRules.value.trim()) form.append("translation_rules", translationRules.value.trim());
 
       const apiUrl = onlyTranslate ? "/api/translate" : "/api/transcribe";
@@ -810,92 +1157,141 @@
       }
       const { job_id } = await startRes.json();
       if (!job_id) throw new Error("任务启动失败，未返回 job_id");
-      currentJobId = job_id;
+      activeJobIds.add(job_id);
+      const useParallelUI = parallelRunEnabled && batchMode;
+      if (useParallelUI) {
+        setParallelTaskState(queueIndex, {
+          status: "running",
+          progress: 0,
+          fileName: file.name,
+          message: "任务已启动",
+        });
+      }
 
       let originalDownloaded = false;
       let lastJobMsg = "";
       let lastJobMsgAt = Date.now();
+      const buildDownloadUrl = (fileParam) =>
+        fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
       const downloadOne = async (fileParam, defaultName) => {
-        const url = fileParam ? `/api/jobs/${job_id}/download?file=${fileParam}` : `/api/jobs/${job_id}/download`;
-        await triggerDownload(url, defaultName);
+        await triggerDownload(buildDownloadUrl(fileParam), defaultName);
       };
 
-      while (true) {
-        if (stopQueue) {
-          throw new Error("队列已停止");
-        }
-        const jobRes = await fetch(`/api/jobs/${job_id}`);
-        if (!jobRes.ok) {
-          const err = await jobRes.json().catch(() => ({ detail: jobRes.statusText }));
-          throw new Error(err.detail || jobRes.statusText);
-        }
-        const job = await jobRes.json();
-        if (!originalDownloaded && job.filename_original) {
-          if (batchMode) {
-            addDownloadLink(
-              `[${queueIndex}] 原字幕：${job.filename_original}`,
-              `/api/jobs/${job_id}/download?file=original`,
-              job.filename_original
-            );
-            try {
-              await downloadOne("original", job.filename_original);
-            } catch (_) {
-              // 自动下载可能被浏览器拦截，保留可点击链接
-            }
-          } else {
-            await downloadOne("original", job.filename_original);
+      try {
+        while (true) {
+          if (stopQueue) {
+            throw new Error("队列已停止");
           }
-          originalDownloaded = true;
-        }
-        if (job.status === "error") {
-          if (originalDownloaded) {
-            showStatus(`文件 ${queueIndex}/${queueTotal}：翻译失败，但原字幕已下载`, "error");
-            return { ok: false };
+          const jobRes = await fetch(`/api/jobs/${job_id}`);
+          if (!jobRes.ok) {
+            const err = await jobRes.json().catch(() => ({ detail: jobRes.statusText }));
+            throw new Error(err.detail || jobRes.statusText);
           }
-          throw new Error(job.error || "任务失败");
-        }
-        if (job.status === "canceled") {
-          throw new Error("任务已取消");
-        }
-        if (job.status === "done") {
-          if (batchMode) {
-            const finalName = job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt";
-            addDownloadLink(
-              `[${queueIndex}] 翻译/字幕：${finalName}`,
-              `/api/jobs/${job_id}/download`,
-              finalName
-            );
-            try {
-              await downloadOne("translated", finalName);
-            } catch (_) {
-              // 自动下载可能被浏览器拦截，保留可点击链接
-            }
-          } else if (job.filename_original) {
-            if (!originalDownloaded) {
+          const job = await jobRes.json();
+          if (!originalDownloaded && job.filename_original) {
+            if (batchMode) {
+              addDownloadLink(
+                `[${queueIndex}] 原字幕：${job.filename_original}`,
+                `/api/jobs/${job_id}/download?file=original`,
+                job.filename_original
+              );
+              if (useParallelUI) {
+                queueAutoDownload(buildDownloadUrl("original"), job.filename_original);
+              } else {
+                try {
+                  await downloadOne("original", job.filename_original);
+                } catch (_) {
+                  // 自动下载可能被浏览器拦截，保留可点击链接
+                }
+              }
+            } else {
               await downloadOne("original", job.filename_original);
             }
-            await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
-          } else {
-            await downloadOne(null, job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+            originalDownloaded = true;
           }
-          showProgress(100, null);
-          showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
-          return { ok: true };
+          if (job.status === "error") {
+            if (originalDownloaded) {
+              const partialFailMsg = `文件 ${queueIndex}/${queueTotal}：翻译失败，但原字幕已下载`;
+              if (useParallelUI) {
+                setParallelTaskState(queueIndex, {
+                  status: "fail",
+                  progress: 100,
+                  message: partialFailMsg,
+                });
+              } else {
+                showStatus(partialFailMsg, "error");
+              }
+              return { ok: false };
+            }
+            throw new Error(job.error || "任务失败");
+          }
+          if (job.status === "canceled") {
+            throw new Error("任务已取消");
+          }
+          if (job.status === "done") {
+            if (batchMode) {
+              const finalName = job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt";
+              addDownloadLink(
+                `[${queueIndex}] 翻译/字幕：${finalName}`,
+                `/api/jobs/${job_id}/download`,
+                finalName
+              );
+              if (useParallelUI) {
+                queueAutoDownload(buildDownloadUrl("translated"), finalName);
+              } else {
+                try {
+                  await downloadOne("translated", finalName);
+                } catch (_) {
+                  // 自动下载可能被浏览器拦截，保留可点击链接
+                }
+              }
+            } else if (job.filename_original) {
+              if (!originalDownloaded) {
+                await downloadOne("original", job.filename_original);
+              }
+              await downloadOne("translated", job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+            } else {
+              await downloadOne(null, job.filename || file.name.replace(/\.[^.]+$/, "") + ".srt");
+            }
+            if (useParallelUI) {
+              setParallelTaskState(queueIndex, {
+                status: "done",
+                progress: 100,
+                fileName: file.name,
+                message: "完成",
+              });
+            } else {
+              showProgress(100, null);
+              showStatus(`文件 ${queueIndex}/${queueTotal} 完成：${file.name}`, "success");
+            }
+            return { ok: true };
+          }
+          const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
+          const msg = job.message || "处理中…";
+          if (msg !== lastJobMsg) {
+            lastJobMsg = msg;
+            lastJobMsgAt = Date.now();
+          }
+          let msgDisplay = msg;
+          const waitingSec = Math.floor((Date.now() - lastJobMsgAt) / 1000);
+          if ((job.stage === "translating" || job.stage === "transcribing") && (progressVal === 0 || progressVal === null) && waitingSec >= 10) {
+            msgDisplay = `${msg}（等待模型响应中 ${waitingSec}s）`;
+          }
+          if (useParallelUI) {
+            setParallelTaskState(queueIndex, {
+              status: "running",
+              progress: progressVal == null ? 0 : progressVal,
+              fileName: file.name,
+              message: msgDisplay,
+            });
+          } else {
+            showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msgDisplay}`, "loading");
+            showProgress(progressVal, job.eta_seconds ?? null);
+          }
+          await new Promise((r) => setTimeout(r, 1000));
         }
-        const progressVal = (job.progress === null || job.progress === undefined) ? null : job.progress;
-        const msg = job.message || "处理中…";
-        if (msg !== lastJobMsg) {
-          lastJobMsg = msg;
-          lastJobMsgAt = Date.now();
-        }
-        let msgDisplay = msg;
-        const waitingSec = Math.floor((Date.now() - lastJobMsgAt) / 1000);
-        if ((job.stage === "translating" || job.stage === "transcribing") && (progressVal === 0 || progressVal === null) && waitingSec >= 10) {
-          msgDisplay = `${msg}（等待模型响应中 ${waitingSec}s）`;
-        }
-        showStatus(`<span class="spinner"></span>[${queueIndex}/${queueTotal}] ${file.name}：${msgDisplay}`, "loading");
-        showProgress(progressVal, job.eta_seconds ?? null);
-        await new Promise((r) => setTimeout(r, 1000));
+      } finally {
+        activeJobIds.delete(job_id);
       }
     }
 
@@ -916,6 +1312,15 @@
           showStatus("请选择翻译 API 与目标语言", "error");
           return;
         }
+      } else {
+        if (translationApi.value !== "none" && translateTo.value === "none") {
+          showStatus("已选择翻译 API，请同时选择“翻译成”目标语言", "error");
+          return;
+        }
+        if (translationApi.value === "none" && translateTo.value !== "none") {
+          showStatus("已选择“翻译成”目标语言，请同时选择翻译 API", "error");
+          return;
+        }
       }
 
       saveApiConfig();
@@ -923,31 +1328,106 @@
       cancelBtn.disabled = false;
       stopQueue = false;
       downloadList.innerHTML = "";
+      parallelTaskStates.clear();
+      parallelRunEnabled = false;
+      parallelTotalFiles = 0;
+      parallelFileNames = files.map((f) => f.name);
+      autoDownloadChain = Promise.resolve();
+      parallelDetailList.innerHTML = "";
+      parallelDetailPanel.style.display = "none";
 
       let okCount = 0;
       let failCount = 0;
       try {
-        for (let i = 0; i < files.length; i++) {
-          if (stopQueue) break;
-          const file = files[i];
-          fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
-          showStatus(`<span class="spinner"></span>队列执行中（${i + 1}/${files.length}）`, "loading");
-          showProgress(0, null);
-          try {
-            const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length, batchMode);
-            if (result.ok) okCount += 1;
-            else failCount += 1;
-          } catch (e) {
-            failCount += 1;
-            if (stopQueue || String(e.message || e).includes("取消")) {
-              break;
-            }
-            showStatus(`文件 ${i + 1}/${files.length} 失败：${e.message || String(e)}`, "error");
+        const canParallel = ["openai", "gemini"].includes(translationApi.value);
+        const workerCount = (batchMode && canParallel) ? Math.min(getParallelFileCount(), files.length) : 1;
+        parallelRunEnabled = workerCount > 1;
+        parallelTotalFiles = files.length;
+        if (parallelRunEnabled) {
+          for (let i = 0; i < files.length; i++) {
+            parallelTaskStates.set(i + 1, {
+              status: "queued",
+              progress: 0,
+              fileName: files[i].name,
+              message: "等待调度…",
+            });
           }
+          renderParallelStatus();
+          renderParallelDetails();
         }
+        let nextIndex = 0;
+        showStatus(
+          workerCount > 1
+            ? `<span class="spinner"></span>队列并行执行中（并发 ${workerCount}）`
+            : `<span class="spinner"></span>队列执行中（串行）`,
+          "loading"
+        );
+        showProgress(0, null);
+
+        const worker = async () => {
+          while (true) {
+            if (stopQueue) return;
+            const i = nextIndex++;
+            if (i >= files.length) return;
+            const file = files[i];
+            if (!parallelRunEnabled) {
+              fileName.textContent = `处理中 ${i + 1}/${files.length}：${file.name}`;
+            } else {
+              setParallelTaskState(i + 1, {
+                status: "running",
+                progress: 0,
+                fileName: file.name,
+                message: "提交任务中…",
+              });
+            }
+            try {
+              const result = await runSingleFileTask(file, onlyTranslate, i + 1, files.length, batchMode);
+              if (result.ok) okCount += 1;
+              else failCount += 1;
+            } catch (e) {
+              const msg = String((e && e.message) || e);
+              if (stopQueue || msg.includes("取消") || msg.includes("队列已停止")) {
+                return;
+              }
+              failCount += 1;
+              if (parallelRunEnabled) {
+                setParallelTaskState(i + 1, {
+                  status: "fail",
+                  progress: 100,
+                  fileName: file.name,
+                  message: msg,
+                });
+              } else {
+                showStatus(`文件 ${i + 1}/${files.length} 失败：${msg}`, "error");
+              }
+            }
+          }
+        };
+
+        const workers = Array.from({ length: workerCount }, () => worker());
+        await Promise.all(workers);
+
         if (stopQueue) {
+          if (parallelRunEnabled) {
+            for (let i = 1; i <= files.length; i++) {
+              const state = parallelTaskStates.get(i) || { fileName: parallelFileNames[i - 1] || `文件 ${i}` };
+              if (state.status !== "done" && state.status !== "fail" && state.status !== "canceled") {
+                parallelTaskStates.set(i, {
+                  ...state,
+                  status: "canceled",
+                  message: "已停止",
+                  progress: Number.isFinite(state.progress) ? state.progress : 0,
+                });
+              }
+            }
+            renderParallelStatus();
+            renderParallelDetails();
+          }
+          const donePercent = files.length ? Math.round(((okCount + failCount) / files.length) * 100) : 0;
+          showProgress(donePercent, null);
           showStatus(`队列已停止：成功 ${okCount}，失败 ${failCount}`, "success");
         } else if (files.length > 1) {
+          showProgress(100, null);
           showStatus(`队列完成：成功 ${okCount}，失败 ${failCount}`, failCount ? "error" : "success");
         }
       } catch (e) {
@@ -955,7 +1435,9 @@
         progressEta.textContent = "";
         showStatus("失败：" + (e.message || String(e)), "error");
       } finally {
-        currentJobId = null;
+        activeJobIds.clear();
+        parallelRunEnabled = false;
+        parallelTotalFiles = 0;
         cancelBtn.disabled = true;
         submitBtn.disabled = false;
       }
