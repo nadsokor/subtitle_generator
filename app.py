@@ -730,12 +730,77 @@ def _purfview_xxl_exe_path() -> str:
     return str(Path(__file__).resolve().parent / ".models" / "purfview-xxl" / PURFVIEW_XXL_EXE_NAME)
 
 
+_PURFVIEW_HELP_CACHE: Dict[str, str] = {}
+_PURFVIEW_HELP_CACHE_LOCK = threading.Lock()
+
+
+def _get_purfview_help_text(exe_path: str) -> str:
+    with _PURFVIEW_HELP_CACHE_LOCK:
+        cached = _PURFVIEW_HELP_CACHE.get(exe_path)
+        if cached is not None:
+            return cached
+    text = ""
+    for arg in ("--help", "-h", "/?"):
+        try:
+            out = subprocess.check_output(
+                [exe_path, arg],
+                cwd=str(Path(exe_path).parent),
+                stderr=subprocess.STDOUT,
+                timeout=8,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if out:
+                text = out.lower()
+                break
+        except subprocess.CalledProcessError as e:
+            msg = (e.output or "").strip()
+            if msg:
+                text = msg.lower()
+                break
+        except Exception:
+            continue
+    with _PURFVIEW_HELP_CACHE_LOCK:
+        _PURFVIEW_HELP_CACHE[exe_path] = text
+    return text
+
+
+def _pick_purfview_flag(help_text: str, candidates: List[str]) -> Optional[str]:
+    low = (help_text or "").lower()
+    for c in candidates:
+        if c.lower() in low:
+            return c
+    # 帮助文本拿不到时，回退到首选参数名
+    return candidates[0] if candidates else None
+
+
+def _append_purfview_arg(
+    cmd: List[str],
+    help_text: str,
+    candidates: List[str],
+    value: Optional[str] = None,
+) -> Optional[str]:
+    flag = _pick_purfview_flag(help_text, candidates)
+    if not flag:
+        return None
+    if value is None:
+        cmd.append(flag)
+    else:
+        cmd.extend([flag, value])
+    return flag
+
+
 def _run_purfview_xxl_transcribe(
     input_path: str,
     model_name: str,
     language: str,
     work_dir: str,
     *,
+    vad_mode: str = "auto",
+    vad_method: str = "",
+    batch_size: int = 0,
+    beam_size: int = 0,
     job_id: str,
     cancel_event: Optional[threading.Event] = None,
 ) -> str:
@@ -748,6 +813,32 @@ def _run_purfview_xxl_transcribe(
     cmd = [exe_path, input_path, "-m", model_name, "-o", work_dir]
     if language and language != "auto":
         cmd += ["-l", language]
+    help_text = _get_purfview_help_text(exe_path)
+    # VAD 开关：优先按显式选择，auto 时不透传，使用 Purfview 默认行为
+    mode = (vad_mode or "auto").strip().lower()
+    if mode == "on":
+        _append_purfview_arg(cmd, help_text, ["--vad_filter", "--vad", "-vad"])
+    elif mode == "off":
+        flag = _append_purfview_arg(cmd, help_text, ["--no_vad_filter", "--no-vad-filter", "--no_vad"])
+        if not flag:
+            # 某些版本仅支持 --vad_filter，尝试显式 false
+            _append_purfview_arg(cmd, help_text, ["--vad_filter"], "false")
+    method = (vad_method or "").strip()
+    if method:
+        _append_purfview_arg(cmd, help_text, ["--vad_method", "--vad_alt_method"], method)
+    if batch_size and batch_size > 0:
+        _append_purfview_arg(cmd, help_text, ["--batch_size", "-bs", "--bs"], str(batch_size))
+    if beam_size and beam_size > 0:
+        _append_purfview_arg(cmd, help_text, ["--beam_size", "--beamsize", "-beamsize"], str(beam_size))
+    _log_api_event(
+        "purfview_cmd",
+        model_name=model_name,
+        vad_mode=mode,
+        vad_method=method,
+        batch_size=batch_size,
+        beam_size=beam_size,
+        cmd_preview=cmd[1:],
+    )
     proc = subprocess.Popen(
         cmd,
         cwd=str(Path(exe_path).parent),
@@ -938,6 +1029,10 @@ def _process_job(
     moonshot_api_key: str,
     moonshot_base_url: str,
     moonshot_model: str,
+    purfview_vad_mode: str,
+    purfview_vad_method: str,
+    purfview_batch_size: int,
+    purfview_beam_size: int,
     translation_rules: str,
     translation_batch_size: int,
     base_name: str = "",
@@ -998,6 +1093,10 @@ def _process_job(
                 model_name,
                 language,
                 work_dir,
+                vad_mode=purfview_vad_mode,
+                vad_method=purfview_vad_method,
+                batch_size=purfview_batch_size,
+                beam_size=purfview_beam_size,
                 job_id=job_id,
                 cancel_event=cancel_event,
             )
@@ -1278,6 +1377,37 @@ def _normalize_openai_reasoning_effort(value: Optional[str]) -> Optional[str]:
         status_code=400,
         detail="OpenAI reasoning effort 不合法。可用值：minimal / low / medium / high（留空为默认）。",
     )
+
+
+def _normalize_purfview_vad_mode(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if raw in ("", "auto", "default"):
+        return "auto"
+    if raw in ("on", "true", "1", "yes", "enabled"):
+        return "on"
+    if raw in ("off", "false", "0", "no", "disabled"):
+        return "off"
+    raise HTTPException(status_code=400, detail="Purfview VAD 选项不合法。可用值：auto / on / off")
+
+
+def _normalize_purfview_vad_method(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    method = raw.replace(" ", "_")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", method):
+        raise HTTPException(status_code=400, detail="Purfview VAD 方法不合法，请仅使用字母/数字/._-")
+    return method
+
+
+def _resolve_optional_positive_int(value: Optional[int], *, min_value: int, max_value: int) -> int:
+    try:
+        n = int(value) if value is not None else 0
+    except Exception:
+        return 0
+    if n <= 0:
+        return 0
+    return max(min_value, min(max_value, n))
 
 
 def translate_segments(
@@ -2441,6 +2571,10 @@ async def transcribe_video(
     moonshot_api_key: str = Form(""),
     moonshot_base_url: str = Form(""),
     moonshot_model: str = Form(""),
+    purfview_vad_mode: str = Form("auto"),
+    purfview_vad_method: str = Form(""),
+    purfview_batch_size: int = Form(0),
+    purfview_beam_size: int = Form(0),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
@@ -2463,6 +2597,10 @@ async def transcribe_video(
         raise HTTPException(status_code=400, detail="已选择翻译 API，请同时选择“翻译成”目标语言")
     if translate_to and translate_to != "none" and (not translation_api or translation_api == "none"):
         raise HTTPException(status_code=400, detail="已选择“翻译成”目标语言，请同时选择翻译 API")
+    pv_vad_mode = _normalize_purfview_vad_mode(purfview_vad_mode)
+    pv_vad_method = _normalize_purfview_vad_method(purfview_vad_method)
+    pv_batch_size = _resolve_optional_positive_int(purfview_batch_size, min_value=1, max_value=256)
+    pv_beam_size = _resolve_optional_positive_int(purfview_beam_size, min_value=1, max_value=32)
 
     available, _, path_or_error = check_ffmpeg_available()
     if not available:
@@ -2506,6 +2644,10 @@ async def transcribe_video(
         gemini_model=gemini_model,
         gemini_thinking_level=gemini_thinking_level,
         moonshot_model=moonshot_model,
+        purfview_vad_mode=pv_vad_mode if engine == "purfview-xxl" else "",
+        purfview_vad_method=pv_vad_method if engine == "purfview-xxl" else "",
+        purfview_batch_size=pv_batch_size if engine == "purfview-xxl" else 0,
+        purfview_beam_size=pv_beam_size if engine == "purfview-xxl" else 0,
         translation_batch_size=translation_batch_size,
         has_translation_rules=bool((translation_rules or "").strip()),
         has_openai_api_key=bool((openai_api_key or "").strip()),
@@ -2536,6 +2678,10 @@ async def transcribe_video(
             moonshot_api_key,
             moonshot_base_url,
             moonshot_model,
+            pv_vad_mode,
+            pv_vad_method,
+            pv_batch_size,
+            pv_beam_size,
             translation_rules,
             translation_batch_size,
             base_name,

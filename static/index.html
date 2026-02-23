@@ -426,6 +426,31 @@
           </select>
         </div>
       </div>
+      <div id="engineConfigPurfview" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+        <div class="field">
+          <label for="purfviewVadMode">Purfview VAD（可选）</label>
+          <select id="purfviewVadMode">
+            <option value="auto" selected>自动（使用默认）</option>
+            <option value="on">启用</option>
+            <option value="off">关闭</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="purfviewVadMethod">Purfview VAD 方法（可选）</label>
+          <input type="text" id="purfviewVadMethod" placeholder="例如：ten / silero_v6_fw / pyannote_v3" autocomplete="off" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="purfviewBatchSize">Purfview Batch Size（可选）</label>
+            <input type="text" id="purfviewBatchSize" inputmode="numeric" pattern="[0-9]*" placeholder="留空默认" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="purfviewBeamSize">Purfview Beam Size（可选）</label>
+            <input type="text" id="purfviewBeamSize" inputmode="numeric" pattern="[0-9]*" placeholder="留空默认" autocomplete="off" />
+          </div>
+        </div>
+        <div class="hint" style="margin-top: 0.35rem;">仅在识别引擎选择 Purfview XXL 时生效</div>
+      </div>
     </div>
 
     <div class="card" id="cardTranslate">
@@ -604,7 +629,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.13";
+    const APP_VERSION = "1.14";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -613,6 +638,11 @@
     const engine = document.getElementById("engine");
     const model = document.getElementById("model");
     const language = document.getElementById("language");
+    const engineConfigPurfview = document.getElementById("engineConfigPurfview");
+    const purfviewVadMode = document.getElementById("purfviewVadMode");
+    const purfviewVadMethod = document.getElementById("purfviewVadMethod");
+    const purfviewBatchSize = document.getElementById("purfviewBatchSize");
+    const purfviewBeamSize = document.getElementById("purfviewBeamSize");
     const translationApi = document.getElementById("translationApi");
     const translateTo = document.getElementById("translateTo");
     const openaiApiKey = document.getElementById("openaiApiKey");
@@ -710,6 +740,7 @@
       parallelFileNames = [];
       parallelDetailList.innerHTML = "";
       parallelDetailPanel.style.display = "none";
+      showEngineConfigFor(engine.value);
     }
     async function checkFfmpegAndShowBanner() {
       try {
@@ -809,6 +840,10 @@
         if (data.translation_api) translationApi.value = data.translation_api;
         if (data.translate_to) translateTo.value = data.translate_to;
         if (data.parallel_file_count) parallelFileCount.value = data.parallel_file_count;
+        if (data.purfview_vad_mode) purfviewVadMode.value = data.purfview_vad_mode;
+        if (data.purfview_vad_method != null) purfviewVadMethod.value = data.purfview_vad_method;
+        if (data.purfview_batch_size) purfviewBatchSize.value = data.purfview_batch_size;
+        if (data.purfview_beam_size) purfviewBeamSize.value = data.purfview_beam_size;
       } catch (_) {}
     }
 
@@ -822,9 +857,17 @@
           translation_api: translationApi.value,
           translate_to: translateTo.value,
           parallel_file_count: parallelFileCount.value.trim(),
+          purfview_vad_mode: purfviewVadMode.value,
+          purfview_vad_method: purfviewVadMethod.value.trim(),
+          purfview_batch_size: purfviewBatchSize.value.trim(),
+          purfview_beam_size: purfviewBeamSize.value.trim(),
         };
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
       } catch (_) {}
+    }
+
+    function showEngineConfigFor(engineName) {
+      engineConfigPurfview.style.display = engineName === "purfview-xxl" ? "block" : "none";
     }
 
     function saveApiConfig() {
@@ -864,6 +907,7 @@
     loadApiConfig();
     loadSettings();
     updateModeUI();
+    showEngineConfigFor(engine.value);
     showApiConfigFor(translationApi.value);
     translationApi.addEventListener("change", () => {
       showApiConfigFor(translationApi.value);
@@ -888,12 +932,22 @@
       updateModeUI();
       saveSettings();
     });
-    engine.addEventListener("change", saveSettings);
+    engine.addEventListener("change", () => {
+      showEngineConfigFor(engine.value);
+      saveSettings();
+    });
     model.addEventListener("change", saveSettings);
     language.addEventListener("change", saveSettings);
     translateTo.addEventListener("change", saveSettings);
     parallelFileCount.addEventListener("change", saveSettings);
     parallelFileCount.addEventListener("blur", saveSettings);
+    purfviewVadMode.addEventListener("change", saveSettings);
+    purfviewVadMethod.addEventListener("change", saveSettings);
+    purfviewVadMethod.addEventListener("blur", saveSettings);
+    purfviewBatchSize.addEventListener("change", saveSettings);
+    purfviewBatchSize.addEventListener("blur", saveSettings);
+    purfviewBeamSize.addEventListener("change", saveSettings);
+    purfviewBeamSize.addEventListener("blur", saveSettings);
 
     openaiApiKey.addEventListener("change", saveApiConfig);
     openaiApiKey.addEventListener("blur", saveApiConfig);
@@ -1157,6 +1211,14 @@
         form.append("engine", engine.value);
         form.append("model_name", model.value);
         form.append("language", language.value);
+        if (engine.value === "purfview-xxl") {
+          form.append("purfview_vad_mode", purfviewVadMode.value || "auto");
+          if (purfviewVadMethod.value.trim()) form.append("purfview_vad_method", purfviewVadMethod.value.trim());
+          const pBatch = parseInt(purfviewBatchSize.value, 10);
+          if (Number.isFinite(pBatch) && pBatch > 0) form.append("purfview_batch_size", String(pBatch));
+          const pBeam = parseInt(purfviewBeamSize.value, 10);
+          if (Number.isFinite(pBeam) && pBeam > 0) form.append("purfview_beam_size", String(pBeam));
+        }
       }
 
       const startRes = await fetch(apiUrl, { method: "POST", body: form });
