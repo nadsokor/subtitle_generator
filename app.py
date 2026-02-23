@@ -15,6 +15,7 @@ import time
 import uuid
 import zipfile
 import json
+import gc
 import logging
 import urllib.request
 import urllib.error
@@ -660,7 +661,12 @@ def _faster_whisper_device() -> str:
 
 
 def _faster_whisper_compute_type(device: str) -> str:
-    return "float16" if device == "cuda" else "float32"
+    env_compute = (os.environ.get("AUTO_SUBBED_FASTER_WHISPER_COMPUTE_TYPE") or "").strip().lower()
+    allowed = {"int8", "int8_float16", "int8_float32", "float16", "float32"}
+    if env_compute in allowed:
+        return env_compute
+    # CPU 默认使用 int8，降低 large/v2 等大模型内存占用，避免长任务后再次启动时被系统杀进程。
+    return "float16" if device == "cuda" else "int8"
 
 
 def _faster_whisper_model_path(model_name: str) -> str:
@@ -893,6 +899,7 @@ def _process_job(
     base_name: str = "",
 ) -> None:
     work_dir = None
+    model = None
     try:
         cancel_event = _get_cancel_event(job_id)
         _update_job(job_id, status="running", stage="downloading", progress=0, message="下载模型中 0%", eta_seconds=None)
@@ -917,6 +924,12 @@ def _process_job(
             _update_job(job_id, stage="downloading", progress=0, message="加载模型中…", eta_seconds=None)
             fw_device = _faster_whisper_device()
             fw_compute = _faster_whisper_compute_type(fw_device)
+            _log_api_event(
+                "faster_whisper_runtime",
+                model_name=model_name,
+                device=fw_device,
+                compute_type=fw_compute,
+            )
             model_root = Path(__file__).resolve().parent / ".models" / "faster-whisper"
             os.makedirs(model_root, exist_ok=True)
             fw_name = _faster_whisper_model_path(model_name)
@@ -1062,6 +1075,26 @@ def _process_job(
                 shutil.rmtree(work_dir)
             except Exception:
                 pass
+        # 尽量释放模型与缓存，降低连续任务时内存峰值导致的进程退出风险。
+        try:
+            if model is not None:
+                del model
+        except Exception:
+            pass
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        try:
+            if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass
+        try:
+            gc.collect()
+        except Exception:
+            pass
 
 
 def _process_translate_only_job(

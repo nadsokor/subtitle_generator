@@ -604,7 +604,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.12";
+    const APP_VERSION = "1.13";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -952,6 +952,15 @@
       if (status === "fail") return { label: "失败", cls: "fail" };
       if (status === "canceled") return { label: "已停止", cls: "canceled" };
       return { label: "排队中", cls: "queued" };
+    }
+
+    function normalizeTaskErrorMessage(input) {
+      const msg = String((input && input.message) || input || "");
+      const lower = msg.toLowerCase();
+      if (lower.includes("failed to fetch") || lower.includes("networkerror")) {
+        return "无法连接后端服务（可能已停止或崩溃），请检查终端日志并重启服务。";
+      }
+      return msg || "未知错误";
     }
 
     function renderParallelDetails() {
@@ -1385,7 +1394,7 @@
               if (result.ok) okCount += 1;
               else failCount += 1;
             } catch (e) {
-              const msg = String((e && e.message) || e);
+              const msg = normalizeTaskErrorMessage(e);
               if (stopQueue || msg.includes("取消") || msg.includes("队列已停止")) {
                 return;
               }
