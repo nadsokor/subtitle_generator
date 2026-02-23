@@ -23,7 +23,7 @@
 - **ffmpeg 集成**：若未检测到系统 ffmpeg，可在页面「一键下载并安装」到应用目录，无需手动配置 PATH
 - **任务进度**：网页端展示下载模型、转写、翻译的进度条与预计剩余时间
 - **大文件优化**：上传按块流式写入，减少大文件（如数 GB）时的内存占用；转写前会显示音频预处理状态（提取音轨/切分）
-- **faster-whisper 稳定性优化**：CPU 默认 `compute_type=int8`（可通过 `AUTO_SUBBED_FASTER_WHISPER_COMPUTE_TYPE` 覆盖），任务结束后主动回收缓存，降低连续任务内存峰值
+- **faster-whisper 稳定性优化**：CPU 默认 `compute_type=int8`（可通过 `AUTO_SUBBED_FASTER_WHISPER_COMPUTE_TYPE` 覆盖）；进程内复用模型实例，减少连续任务时重复加载与卸载导致的异常风险
 - **并行任务明细面板**：多文件并行时实时展示每个文件的排队/运行/完成/失败状态与进度
 - **API 请求日志**：自动写入 `logs/api_requests.log`，包含请求路径、状态码、耗时及关键提交参数（敏感字段脱敏）
 
@@ -120,6 +120,7 @@ auto_subbed/
 ## 日志与排查
 
 - 默认日志文件：`logs/api_requests.log`
+- 崩溃回溯日志：`logs/crash.log`（用于排查 Python 原生崩溃/段错误）
 - 日志内容：`/api/*` 请求起止、状态码、耗时、客户端信息，以及 `/api/transcribe`、`/api/translate` 的关键业务参数
 - 敏感字段（如 API Key）会自动脱敏，不会记录明文
 - 轮转策略：按文件大小滚动，超出后自动生成历史文件并按保留份数删除旧日志

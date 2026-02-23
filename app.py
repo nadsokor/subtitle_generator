@@ -16,6 +16,7 @@ import uuid
 import zipfile
 import json
 import gc
+import faulthandler
 import logging
 import urllib.request
 import urllib.error
@@ -154,6 +155,13 @@ _FFMPEG_BIN_DIR: Optional[Path] = None  # 当前使用的 ffmpeg 目录（应用
 # 日志目录（按大小轮转并自动清理历史）
 LOG_DIR = APP_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+CRASH_LOG_FILE = LOG_DIR / "crash.log"
+_FAULT_HANDLER_STREAM = None
+try:
+    _FAULT_HANDLER_STREAM = open(CRASH_LOG_FILE, "a", encoding="utf-8")
+    faulthandler.enable(file=_FAULT_HANDLER_STREAM, all_threads=True)
+except Exception:
+    _FAULT_HANDLER_STREAM = None
 
 
 def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
@@ -240,6 +248,7 @@ def _log_api_event(event: str, **payload: Any) -> None:
 _log_api_event(
     "log_init",
     log_file=str(API_LOG_FILE),
+    crash_log_file=str(CRASH_LOG_FILE),
     max_bytes=API_LOG_MAX_BYTES,
     backup_count=API_LOG_BACKUP_COUNT,
 )
@@ -678,6 +687,41 @@ def _faster_whisper_model_path(model_name: str) -> str:
     return model_name
 
 
+_FASTER_WHISPER_CACHE: Dict[str, WhisperModel] = {}
+_FASTER_WHISPER_CACHE_LOCK = threading.Lock()
+
+
+def _get_faster_whisper_model_cached(
+    model_name: str,
+    *,
+    device: str,
+    compute_type: str,
+    download_root: str,
+) -> WhisperModel:
+    fw_name = _faster_whisper_model_path(model_name)
+    cache_key = f"{fw_name}|{device}|{compute_type}"
+    with _FASTER_WHISPER_CACHE_LOCK:
+        cached = _FASTER_WHISPER_CACHE.get(cache_key)
+        if cached is not None:
+            _log_api_event(
+                "faster_whisper_cache_hit",
+                cache_key=cache_key,
+            )
+            return cached
+        model = WhisperModel(
+            fw_name,
+            device=device,
+            compute_type=compute_type,
+            download_root=download_root,
+        )
+        _FASTER_WHISPER_CACHE[cache_key] = model
+        _log_api_event(
+            "faster_whisper_cache_store",
+            cache_key=cache_key,
+        )
+        return model
+
+
 def _purfview_xxl_exe_path() -> str:
     """返回 Purfview faster-whisper-xxl.exe 路径。"""
     env = (os.environ.get("PURFVIEW_XXL_EXE") or "").strip()
@@ -932,9 +976,8 @@ def _process_job(
             )
             model_root = Path(__file__).resolve().parent / ".models" / "faster-whisper"
             os.makedirs(model_root, exist_ok=True)
-            fw_name = _faster_whisper_model_path(model_name)
-            model = WhisperModel(
-                fw_name,
+            model = _get_faster_whisper_model_cached(
+                model_name,
                 device=fw_device,
                 compute_type=fw_compute,
                 download_root=str(model_root),
@@ -1075,26 +1118,29 @@ def _process_job(
                 shutil.rmtree(work_dir)
             except Exception:
                 pass
-        # 尽量释放模型与缓存，降低连续任务时内存峰值导致的进程退出风险。
-        try:
-            if model is not None:
-                del model
-        except Exception:
-            pass
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-        try:
-            if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-                torch.mps.empty_cache()
-        except Exception:
-            pass
-        try:
-            gc.collect()
-        except Exception:
-            pass
+        # faster-whisper 采用进程内模型缓存，避免任务完成时销毁模型导致潜在底层崩溃。
+        if engine != "faster-whisper":
+            try:
+                if model is not None:
+                    del model
+            except Exception:
+                pass
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
+                if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+            except Exception:
+                pass
+            try:
+                gc.collect()
+            except Exception:
+                pass
+        else:
+            _log_api_event("faster_whisper_keepalive", message="任务结束后保留模型实例，避免卸载崩溃")
 
 
 def _process_translate_only_job(
