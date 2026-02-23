@@ -15,6 +15,8 @@ import time
 import uuid
 import zipfile
 import json
+import gc
+import faulthandler
 import logging
 import urllib.request
 import urllib.error
@@ -153,6 +155,13 @@ _FFMPEG_BIN_DIR: Optional[Path] = None  # 当前使用的 ffmpeg 目录（应用
 # 日志目录（按大小轮转并自动清理历史）
 LOG_DIR = APP_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+CRASH_LOG_FILE = LOG_DIR / "crash.log"
+_FAULT_HANDLER_STREAM = None
+try:
+    _FAULT_HANDLER_STREAM = open(CRASH_LOG_FILE, "a", encoding="utf-8")
+    faulthandler.enable(file=_FAULT_HANDLER_STREAM, all_threads=True)
+except Exception:
+    _FAULT_HANDLER_STREAM = None
 
 
 def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
@@ -239,6 +248,7 @@ def _log_api_event(event: str, **payload: Any) -> None:
 _log_api_event(
     "log_init",
     log_file=str(API_LOG_FILE),
+    crash_log_file=str(CRASH_LOG_FILE),
     max_bytes=API_LOG_MAX_BYTES,
     backup_count=API_LOG_BACKUP_COUNT,
 )
@@ -660,7 +670,12 @@ def _faster_whisper_device() -> str:
 
 
 def _faster_whisper_compute_type(device: str) -> str:
-    return "float16" if device == "cuda" else "float32"
+    env_compute = (os.environ.get("AUTO_SUBBED_FASTER_WHISPER_COMPUTE_TYPE") or "").strip().lower()
+    allowed = {"int8", "int8_float16", "int8_float32", "float16", "float32"}
+    if env_compute in allowed:
+        return env_compute
+    # CPU 默认使用 int8，降低 large/v2 等大模型内存占用，避免长任务后再次启动时被系统杀进程。
+    return "float16" if device == "cuda" else "int8"
 
 
 def _faster_whisper_model_path(model_name: str) -> str:
@@ -672,6 +687,41 @@ def _faster_whisper_model_path(model_name: str) -> str:
     return model_name
 
 
+_FASTER_WHISPER_CACHE: Dict[str, WhisperModel] = {}
+_FASTER_WHISPER_CACHE_LOCK = threading.Lock()
+
+
+def _get_faster_whisper_model_cached(
+    model_name: str,
+    *,
+    device: str,
+    compute_type: str,
+    download_root: str,
+) -> WhisperModel:
+    fw_name = _faster_whisper_model_path(model_name)
+    cache_key = f"{fw_name}|{device}|{compute_type}"
+    with _FASTER_WHISPER_CACHE_LOCK:
+        cached = _FASTER_WHISPER_CACHE.get(cache_key)
+        if cached is not None:
+            _log_api_event(
+                "faster_whisper_cache_hit",
+                cache_key=cache_key,
+            )
+            return cached
+        model = WhisperModel(
+            fw_name,
+            device=device,
+            compute_type=compute_type,
+            download_root=download_root,
+        )
+        _FASTER_WHISPER_CACHE[cache_key] = model
+        _log_api_event(
+            "faster_whisper_cache_store",
+            cache_key=cache_key,
+        )
+        return model
+
+
 def _purfview_xxl_exe_path() -> str:
     """返回 Purfview faster-whisper-xxl.exe 路径。"""
     env = (os.environ.get("PURFVIEW_XXL_EXE") or "").strip()
@@ -680,12 +730,77 @@ def _purfview_xxl_exe_path() -> str:
     return str(Path(__file__).resolve().parent / ".models" / "purfview-xxl" / PURFVIEW_XXL_EXE_NAME)
 
 
+_PURFVIEW_HELP_CACHE: Dict[str, str] = {}
+_PURFVIEW_HELP_CACHE_LOCK = threading.Lock()
+
+
+def _get_purfview_help_text(exe_path: str) -> str:
+    with _PURFVIEW_HELP_CACHE_LOCK:
+        cached = _PURFVIEW_HELP_CACHE.get(exe_path)
+        if cached is not None:
+            return cached
+    text = ""
+    for arg in ("--help", "-h", "/?"):
+        try:
+            out = subprocess.check_output(
+                [exe_path, arg],
+                cwd=str(Path(exe_path).parent),
+                stderr=subprocess.STDOUT,
+                timeout=8,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if out:
+                text = out.lower()
+                break
+        except subprocess.CalledProcessError as e:
+            msg = (e.output or "").strip()
+            if msg:
+                text = msg.lower()
+                break
+        except Exception:
+            continue
+    with _PURFVIEW_HELP_CACHE_LOCK:
+        _PURFVIEW_HELP_CACHE[exe_path] = text
+    return text
+
+
+def _pick_purfview_flag(help_text: str, candidates: List[str]) -> Optional[str]:
+    low = (help_text or "").lower()
+    for c in candidates:
+        if c.lower() in low:
+            return c
+    # 帮助文本拿不到时，回退到首选参数名
+    return candidates[0] if candidates else None
+
+
+def _append_purfview_arg(
+    cmd: List[str],
+    help_text: str,
+    candidates: List[str],
+    value: Optional[str] = None,
+) -> Optional[str]:
+    flag = _pick_purfview_flag(help_text, candidates)
+    if not flag:
+        return None
+    if value is None:
+        cmd.append(flag)
+    else:
+        cmd.extend([flag, value])
+    return flag
+
+
 def _run_purfview_xxl_transcribe(
     input_path: str,
     model_name: str,
     language: str,
     work_dir: str,
     *,
+    vad_mode: str = "auto",
+    vad_method: str = "",
+    batch_size: int = 0,
+    beam_size: int = 0,
     job_id: str,
     cancel_event: Optional[threading.Event] = None,
 ) -> str:
@@ -698,6 +813,33 @@ def _run_purfview_xxl_transcribe(
     cmd = [exe_path, input_path, "-m", model_name, "-o", work_dir]
     if language and language != "auto":
         cmd += ["-l", language]
+    help_text = _get_purfview_help_text(exe_path)
+    # VAD 开关：优先按显式选择，auto 时不透传，使用 Purfview 默认行为
+    mode = (vad_mode or "auto").strip().lower()
+    if mode == "on":
+        # 一些 Purfview 版本将 --vad_filter/-vad 定义为“必须带值”的参数。
+        _append_purfview_arg(cmd, help_text, ["--vad_filter", "--vad", "-vad"], "true")
+    elif mode == "off":
+        flag = _append_purfview_arg(cmd, help_text, ["--no_vad_filter", "--no-vad-filter", "--no_vad"])
+        if not flag:
+            # 某些版本仅支持 --vad_filter，尝试显式 false
+            _append_purfview_arg(cmd, help_text, ["--vad_filter"], "false")
+    method = (vad_method or "").strip()
+    if method:
+        _append_purfview_arg(cmd, help_text, ["--vad_method", "--vad_alt_method"], method)
+    if batch_size and batch_size > 0:
+        _append_purfview_arg(cmd, help_text, ["--batch_size", "-bs", "--bs"], str(batch_size))
+    if beam_size and beam_size > 0:
+        _append_purfview_arg(cmd, help_text, ["--beam_size", "--beamsize", "-beamsize"], str(beam_size))
+    _log_api_event(
+        "purfview_cmd",
+        model_name=model_name,
+        vad_mode=mode,
+        vad_method=method,
+        batch_size=batch_size,
+        beam_size=beam_size,
+        cmd_preview=cmd[1:],
+    )
     proc = subprocess.Popen(
         cmd,
         cwd=str(Path(exe_path).parent),
@@ -804,10 +946,19 @@ def _get_media_duration(path: str) -> Optional[float]:
         return None
 
 
-def _split_audio(input_path: str, work_dir: str, segment_seconds: int = 30) -> List[str]:
+def _split_audio(
+    input_path: str,
+    work_dir: str,
+    segment_seconds: int = 30,
+    status_cb: Optional[Callable[[str], None]] = None,
+) -> List[str]:
     wav_path = os.path.join(work_dir, "audio.wav")
+    if status_cb:
+        status_cb("音频预处理中：提取音轨…")
     _run_cmd(["ffmpeg", "-y", "-i", input_path, "-ac", "1", "-ar", "16000", "-vn", wav_path])
     pattern = os.path.join(work_dir, "chunk_%04d.wav")
+    if status_cb:
+        status_cb("音频预处理中：切分音频…")
     _run_cmd(
         [
             "ffmpeg",
@@ -824,7 +975,39 @@ def _split_audio(input_path: str, work_dir: str, segment_seconds: int = 30) -> L
         ]
     )
     chunks = sorted(str(p) for p in Path(work_dir).glob("chunk_*.wav"))
+    if status_cb:
+        status_cb(f"音频预处理完成，共 {len(chunks)} 段，开始转写…")
     return chunks
+
+
+async def _save_upload_to_temp_file(upload: UploadFile, suffix: str, chunk_size: int = 1024 * 1024) -> Tuple[str, int]:
+    """将上传文件按块写入临时文件，避免一次性读入大文件。"""
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    total = 0
+    try:
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+            tmp.write(chunk)
+        tmp.flush()
+        return tmp.name, total
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        try:
+            await upload.close()
+        except Exception:
+            pass
 
 
 def _process_job(
@@ -847,11 +1030,16 @@ def _process_job(
     moonshot_api_key: str,
     moonshot_base_url: str,
     moonshot_model: str,
+    purfview_vad_mode: str,
+    purfview_vad_method: str,
+    purfview_batch_size: int,
+    purfview_beam_size: int,
     translation_rules: str,
     translation_batch_size: int,
     base_name: str = "",
 ) -> None:
     work_dir = None
+    model = None
     try:
         cancel_event = _get_cancel_event(job_id)
         _update_job(job_id, status="running", stage="downloading", progress=0, message="下载模型中 0%", eta_seconds=None)
@@ -876,11 +1064,16 @@ def _process_job(
             _update_job(job_id, stage="downloading", progress=0, message="加载模型中…", eta_seconds=None)
             fw_device = _faster_whisper_device()
             fw_compute = _faster_whisper_compute_type(fw_device)
+            _log_api_event(
+                "faster_whisper_runtime",
+                model_name=model_name,
+                device=fw_device,
+                compute_type=fw_compute,
+            )
             model_root = Path(__file__).resolve().parent / ".models" / "faster-whisper"
             os.makedirs(model_root, exist_ok=True)
-            fw_name = _faster_whisper_model_path(model_name)
-            model = WhisperModel(
-                fw_name,
+            model = _get_faster_whisper_model_cached(
+                model_name,
                 device=fw_device,
                 compute_type=fw_compute,
                 download_root=str(model_root),
@@ -901,14 +1094,29 @@ def _process_job(
                 model_name,
                 language,
                 work_dir,
+                vad_mode=purfview_vad_mode,
+                vad_method=purfview_vad_method,
+                batch_size=purfview_batch_size,
+                beam_size=purfview_beam_size,
                 job_id=job_id,
                 cancel_event=cancel_event,
             )
             all_segments = srt_to_segments(srt_original_content)
         else:
-            chunks = _split_audio(input_path, work_dir)
+            chunks = _split_audio(
+                input_path,
+                work_dir,
+                status_cb=lambda msg: _update_job(
+                    job_id,
+                    stage="preprocessing",
+                    progress=0,
+                    message=msg,
+                    eta_seconds=None,
+                ),
+            )
             if not chunks:
                 raise RuntimeError("无法切分音频，请检查输入文件或 ffmpeg")
+            _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
 
             all_segments = []
             total_chunks = len(chunks)
@@ -1010,6 +1218,29 @@ def _process_job(
                 shutil.rmtree(work_dir)
             except Exception:
                 pass
+        # faster-whisper 采用进程内模型缓存，避免任务完成时销毁模型导致潜在底层崩溃。
+        if engine != "faster-whisper":
+            try:
+                if model is not None:
+                    del model
+            except Exception:
+                pass
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
+                if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+            except Exception:
+                pass
+            try:
+                gc.collect()
+            except Exception:
+                pass
+        else:
+            _log_api_event("faster_whisper_keepalive", message="任务结束后保留模型实例，避免卸载崩溃")
 
 
 def _process_translate_only_job(
@@ -1147,6 +1378,37 @@ def _normalize_openai_reasoning_effort(value: Optional[str]) -> Optional[str]:
         status_code=400,
         detail="OpenAI reasoning effort 不合法。可用值：minimal / low / medium / high（留空为默认）。",
     )
+
+
+def _normalize_purfview_vad_mode(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if raw in ("", "auto", "default"):
+        return "auto"
+    if raw in ("on", "true", "1", "yes", "enabled"):
+        return "on"
+    if raw in ("off", "false", "0", "no", "disabled"):
+        return "off"
+    raise HTTPException(status_code=400, detail="Purfview VAD 选项不合法。可用值：auto / on / off")
+
+
+def _normalize_purfview_vad_method(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    method = raw.replace(" ", "_")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", method):
+        raise HTTPException(status_code=400, detail="Purfview VAD 方法不合法，请仅使用字母/数字/._-")
+    return method
+
+
+def _resolve_optional_positive_int(value: Optional[int], *, min_value: int, max_value: int) -> int:
+    try:
+        n = int(value) if value is not None else 0
+    except Exception:
+        return 0
+    if n <= 0:
+        return 0
+    return max(min_value, min(max_value, n))
 
 
 def translate_segments(
@@ -2310,6 +2572,10 @@ async def transcribe_video(
     moonshot_api_key: str = Form(""),
     moonshot_base_url: str = Form(""),
     moonshot_model: str = Form(""),
+    purfview_vad_mode: str = Form("auto"),
+    purfview_vad_method: str = Form(""),
+    purfview_batch_size: int = Form(0),
+    purfview_beam_size: int = Form(0),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
@@ -2332,6 +2598,10 @@ async def transcribe_video(
         raise HTTPException(status_code=400, detail="已选择翻译 API，请同时选择“翻译成”目标语言")
     if translate_to and translate_to != "none" and (not translation_api or translation_api == "none"):
         raise HTTPException(status_code=400, detail="已选择“翻译成”目标语言，请同时选择翻译 API")
+    pv_vad_mode = _normalize_purfview_vad_mode(purfview_vad_mode)
+    pv_vad_method = _normalize_purfview_vad_method(purfview_vad_method)
+    pv_batch_size = _resolve_optional_positive_int(purfview_batch_size, min_value=1, max_value=256)
+    pv_beam_size = _resolve_optional_positive_int(purfview_beam_size, min_value=1, max_value=32)
 
     available, _, path_or_error = check_ffmpeg_available()
     if not available:
@@ -2340,13 +2610,12 @@ async def transcribe_video(
             detail=path_or_error or "未检测到 ffmpeg。请安装到系统 PATH 或在首页点击「一键安装 ffmpeg」。",
         )
 
-    # 保存上传到临时文件（保留原扩展名以便 ffmpeg 识别）
+    # 保存上传到临时文件（流式写入，避免大文件一次性读入内存）
     suffix = ext or ".mp4"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        uploaded_bytes = len(content)
-        tmp.write(content)
-        input_path = tmp.name
+    try:
+        input_path, uploaded_bytes = await _save_upload_to_temp_file(file, suffix)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存上传文件失败: {e!s}") from e
 
     base_name = Path(file.filename or "video").stem
     out_suffix = _translated_suffix(
@@ -2376,6 +2645,10 @@ async def transcribe_video(
         gemini_model=gemini_model,
         gemini_thinking_level=gemini_thinking_level,
         moonshot_model=moonshot_model,
+        purfview_vad_mode=pv_vad_mode if engine == "purfview-xxl" else "",
+        purfview_vad_method=pv_vad_method if engine == "purfview-xxl" else "",
+        purfview_batch_size=pv_batch_size if engine == "purfview-xxl" else 0,
+        purfview_beam_size=pv_beam_size if engine == "purfview-xxl" else 0,
         translation_batch_size=translation_batch_size,
         has_translation_rules=bool((translation_rules or "").strip()),
         has_openai_api_key=bool((openai_api_key or "").strip()),
@@ -2406,6 +2679,10 @@ async def transcribe_video(
             moonshot_api_key,
             moonshot_base_url,
             moonshot_model,
+            pv_vad_mode,
+            pv_vad_method,
+            pv_batch_size,
+            pv_beam_size,
             translation_rules,
             translation_batch_size,
             base_name,
@@ -2448,11 +2725,10 @@ async def translate_only(
     if not translation_api or translation_api == "none":
         raise HTTPException(status_code=400, detail="请选择翻译 API")
 
-    with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".srt") as tmp:
-        content = await file.read()
-        uploaded_bytes = len(content)
-        tmp.write(content)
-        srt_path = tmp.name
+    try:
+        srt_path, uploaded_bytes = await _save_upload_to_temp_file(file, ".srt")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存上传文件失败: {e!s}") from e
 
     base_name = Path(file.filename or "subtitle").stem
     out_suffix = _translated_suffix(

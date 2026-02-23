@@ -22,6 +22,8 @@
   - **翻译风格与规则**：可选填写说明（OpenAI / Gemini / Moonshot 生效），如语气、专有名词保留等
 - **ffmpeg 集成**：若未检测到系统 ffmpeg，可在页面「一键下载并安装」到应用目录，无需手动配置 PATH
 - **任务进度**：网页端展示下载模型、转写、翻译的进度条与预计剩余时间
+- **大文件优化**：上传按块流式写入，减少大文件（如数 GB）时的内存占用；转写前会显示音频预处理状态（提取音轨/切分）
+- **faster-whisper 稳定性优化**：CPU 默认 `compute_type=int8`（可通过 `AUTO_SUBBED_FASTER_WHISPER_COMPUTE_TYPE` 覆盖）；进程内复用模型实例，减少连续任务时重复加载与卸载导致的异常风险
 - **并行任务明细面板**：多文件并行时实时展示每个文件的排队/运行/完成/失败状态与进度
 - **API 请求日志**：自动写入 `logs/api_requests.log`，包含请求路径、状态码、耗时及关键提交参数（敏感字段脱敏）
 
@@ -78,6 +80,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 2. 在页面中**选择或拖拽**视频/音频文件
 3. 选择 **Whisper 模型**：体积越大精度越高、速度越慢（如 `base` 平衡速度与效果）
    - **识别引擎**：可选 Whisper 原版、faster-whisper（更快）或 Purfview XXL（exe）
+   - 选 **Purfview XXL（exe）** 时，可配置 `VAD`、`VAD 方法`、`Batch Size`、`Beam Size`
 4. 选择 **字幕语言**：若已知语种可指定，否则选「自动检测」
 5. （可选）**翻译**：
    - 在「翻译 API」中选 Google / DeepL / OpenAI / Gemini / Moonshot，在「翻译成」中选目标语言
@@ -118,6 +121,7 @@ auto_subbed/
 ## 日志与排查
 
 - 默认日志文件：`logs/api_requests.log`
+- 崩溃回溯日志：`logs/crash.log`（用于排查 Python 原生崩溃/段错误）
 - 日志内容：`/api/*` 请求起止、状态码、耗时、客户端信息，以及 `/api/transcribe`、`/api/translate` 的关键业务参数
 - 敏感字段（如 API Key）会自动脱敏，不会记录明文
 - 轮转策略：按文件大小滚动，超出后自动生成历史文件并按保留份数删除旧日志
@@ -154,7 +158,7 @@ auto_subbed/
 ## 技术说明
 
 - **后端**：FastAPI + OpenAI Whisper（`openai-whisper`）+ 翻译（`deep-translator`：Google，`deepl`：DeepL，`openai`：OpenAI/Moonshot Chat Completions，`google-genai`：Gemini）
-- **Purfview XXL（可选）**：将 `faster-whisper-xxl.exe` 放到 `app.py` 同级的 `.models/purfview-xxl/`，选择引擎为 `Purfview XXL（exe）` 即可调用
+- **Purfview XXL（可选）**：将 `faster-whisper-xxl.exe` 放到 `app.py` 同级的 `.models/purfview-xxl/`，选择引擎为 `Purfview XXL（exe）` 即可调用；支持在前端设置 VAD / Batch Size / Beam Size 等参数
 - **前端**：单页 HTML + 原生 JS，无构建步骤；配置与 API Key 使用 localStorage 持久化
 - **ffmpeg**：优先使用系统 PATH；若无则从 BtbN（Windows/Linux）或 evermeet（macOS）下载并解压到 `.ffmpeg/<平台>`，仅当前进程 PATH 生效
 - **任务流程**：提交后异步执行（下载模型 → 转写 → 可选翻译），前端轮询任务状态并展示进度与预计剩余时间
