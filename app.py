@@ -804,10 +804,19 @@ def _get_media_duration(path: str) -> Optional[float]:
         return None
 
 
-def _split_audio(input_path: str, work_dir: str, segment_seconds: int = 30) -> List[str]:
+def _split_audio(
+    input_path: str,
+    work_dir: str,
+    segment_seconds: int = 30,
+    status_cb: Optional[Callable[[str], None]] = None,
+) -> List[str]:
     wav_path = os.path.join(work_dir, "audio.wav")
+    if status_cb:
+        status_cb("音频预处理中：提取音轨…")
     _run_cmd(["ffmpeg", "-y", "-i", input_path, "-ac", "1", "-ar", "16000", "-vn", wav_path])
     pattern = os.path.join(work_dir, "chunk_%04d.wav")
+    if status_cb:
+        status_cb("音频预处理中：切分音频…")
     _run_cmd(
         [
             "ffmpeg",
@@ -824,7 +833,39 @@ def _split_audio(input_path: str, work_dir: str, segment_seconds: int = 30) -> L
         ]
     )
     chunks = sorted(str(p) for p in Path(work_dir).glob("chunk_*.wav"))
+    if status_cb:
+        status_cb(f"音频预处理完成，共 {len(chunks)} 段，开始转写…")
     return chunks
+
+
+async def _save_upload_to_temp_file(upload: UploadFile, suffix: str, chunk_size: int = 1024 * 1024) -> Tuple[str, int]:
+    """将上传文件按块写入临时文件，避免一次性读入大文件。"""
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    total = 0
+    try:
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+            tmp.write(chunk)
+        tmp.flush()
+        return tmp.name, total
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        try:
+            await upload.close()
+        except Exception:
+            pass
 
 
 def _process_job(
@@ -906,9 +947,20 @@ def _process_job(
             )
             all_segments = srt_to_segments(srt_original_content)
         else:
-            chunks = _split_audio(input_path, work_dir)
+            chunks = _split_audio(
+                input_path,
+                work_dir,
+                status_cb=lambda msg: _update_job(
+                    job_id,
+                    stage="preprocessing",
+                    progress=0,
+                    message=msg,
+                    eta_seconds=None,
+                ),
+            )
             if not chunks:
                 raise RuntimeError("无法切分音频，请检查输入文件或 ffmpeg")
+            _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
 
             all_segments = []
             total_chunks = len(chunks)
@@ -2340,13 +2392,12 @@ async def transcribe_video(
             detail=path_or_error or "未检测到 ffmpeg。请安装到系统 PATH 或在首页点击「一键安装 ffmpeg」。",
         )
 
-    # 保存上传到临时文件（保留原扩展名以便 ffmpeg 识别）
+    # 保存上传到临时文件（流式写入，避免大文件一次性读入内存）
     suffix = ext or ".mp4"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        uploaded_bytes = len(content)
-        tmp.write(content)
-        input_path = tmp.name
+    try:
+        input_path, uploaded_bytes = await _save_upload_to_temp_file(file, suffix)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存上传文件失败: {e!s}") from e
 
     base_name = Path(file.filename or "video").stem
     out_suffix = _translated_suffix(
@@ -2448,11 +2499,10 @@ async def translate_only(
     if not translation_api or translation_api == "none":
         raise HTTPException(status_code=400, detail="请选择翻译 API")
 
-    with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".srt") as tmp:
-        content = await file.read()
-        uploaded_bytes = len(content)
-        tmp.write(content)
-        srt_path = tmp.name
+    try:
+        srt_path, uploaded_bytes = await _save_upload_to_temp_file(file, ".srt")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存上传文件失败: {e!s}") from e
 
     base_name = Path(file.filename or "subtitle").stem
     out_suffix = _translated_suffix(
