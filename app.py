@@ -817,7 +817,8 @@ def _run_purfview_xxl_transcribe(
     # VAD 开关：优先按显式选择，auto 时不透传，使用 Purfview 默认行为
     mode = (vad_mode or "auto").strip().lower()
     if mode == "on":
-        _append_purfview_arg(cmd, help_text, ["--vad_filter", "--vad", "-vad"])
+        # 一些 Purfview 版本将 --vad_filter/-vad 定义为“必须带值”的参数。
+        _append_purfview_arg(cmd, help_text, ["--vad_filter", "--vad", "-vad"], "true")
     elif mode == "off":
         flag = _append_purfview_arg(cmd, help_text, ["--no_vad_filter", "--no-vad-filter", "--no_vad"])
         if not flag:
