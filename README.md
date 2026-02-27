@@ -26,6 +26,7 @@
 - **faster-whisper 稳定性优化**：CPU 默认 `compute_type=int8`（可通过 `AUTO_SUBBED_FASTER_WHISPER_COMPUTE_TYPE` 覆盖）；进程内复用模型实例，减少连续任务时重复加载与卸载导致的异常风险
 - **并行任务明细面板**：多文件并行时实时展示每个文件的排队/运行/完成/失败状态与进度
 - **API 请求日志**：自动写入 `logs/api_requests.log`，包含请求路径、状态码、耗时及关键提交参数（敏感字段脱敏）
+- **翻译外部 API I/O 日志**：自动写入 `logs/translation_api_io.log`，记录翻译请求输入与返回输出（敏感字段脱敏，可用于定位翻译问题）
 
 ## 环境要求
 
@@ -92,7 +93,7 @@ uvicorn app:app --host 0.0.0.0 --port 8765
    - 可在「并行文件数」中设置 OpenAI / Gemini 的多文件并发数（默认 3，建议 1~5）
 6. 点击 **「生成字幕」**，等待任务完成（页面会显示进度条与预计剩余时间）
 7. 完成后会自动下载 `.srt` 文件（若启用了翻译，文件名为 `原名.语言码.srt`，如 `demo.zh.srt`）
-8. 若需排查问题，可查看 `logs/api_requests.log`（自动轮转清理历史）
+8. 若需排查问题，可查看 `logs/api_requests.log` 与 `logs/translation_api_io.log`（均自动轮转清理历史）
 
 ### 翻译 API 说明
 
@@ -121,6 +122,7 @@ auto_subbed/
 ## 日志与排查
 
 - 默认日志文件：`logs/api_requests.log`
+- 翻译外部 I/O 日志：`logs/translation_api_io.log`（按 provider 记录 request/response/error，便于对照输入输出）
 - 崩溃回溯日志：`logs/crash.log`（用于排查 Python 原生崩溃/段错误）
 - 日志内容：`/api/*` 请求起止、状态码、耗时、客户端信息，以及 `/api/transcribe`、`/api/translate` 的关键业务参数
 - 敏感字段（如 API Key）会自动脱敏，不会记录明文
@@ -128,6 +130,9 @@ auto_subbed/
 - 可通过环境变量调整：
   - `AUTO_SUBBED_API_LOG_MAX_BYTES`：单个日志文件最大字节数（默认 `10485760`，即 10MB）
   - `AUTO_SUBBED_API_LOG_BACKUP_COUNT`：保留历史日志份数（默认 `10`）
+  - `AUTO_SUBBED_TRANSLATION_IO_LOG_MAX_BYTES`：翻译 I/O 日志单文件最大字节数（默认 `20971520`，即 20MB）
+  - `AUTO_SUBBED_TRANSLATION_IO_LOG_BACKUP_COUNT`：翻译 I/O 日志保留历史份数（默认 `20`）
+  - `AUTO_SUBBED_TRANSLATION_IO_MAX_VALUE_LENGTH`：翻译 I/O 单字段最大记录长度（默认 `12000` 字符，超出会截断）
 
 ## Windows 常见问题
 

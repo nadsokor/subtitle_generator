@@ -178,7 +178,41 @@ def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
 API_LOG_FILE = LOG_DIR / "api_requests.log"
 API_LOG_MAX_BYTES = _env_int("AUTO_SUBBED_API_LOG_MAX_BYTES", 10 * 1024 * 1024, min_value=1024 * 64, max_value=1024 * 1024 * 512)
 API_LOG_BACKUP_COUNT = _env_int("AUTO_SUBBED_API_LOG_BACKUP_COUNT", 10, min_value=1, max_value=200)
+TRANSLATION_IO_LOG_FILE = LOG_DIR / "translation_api_io.log"
+TRANSLATION_IO_LOG_MAX_BYTES = _env_int(
+    "AUTO_SUBBED_TRANSLATION_IO_LOG_MAX_BYTES",
+    20 * 1024 * 1024,
+    min_value=1024 * 64,
+    max_value=1024 * 1024 * 512,
+)
+TRANSLATION_IO_LOG_BACKUP_COUNT = _env_int(
+    "AUTO_SUBBED_TRANSLATION_IO_LOG_BACKUP_COUNT",
+    20,
+    min_value=1,
+    max_value=200,
+)
+TRANSLATION_IO_MAX_VALUE_LENGTH = _env_int(
+    "AUTO_SUBBED_TRANSLATION_IO_MAX_VALUE_LENGTH",
+    12000,
+    min_value=256,
+    max_value=1024 * 1024,
+)
 _SENSITIVE_FIELD_MARKERS = ("api_key", "apikey", "authorization", "token", "password", "secret", "key")
+_NON_SENSITIVE_TOKEN_KEYS = {
+    "max_token",
+    "max_tokens",
+    "max_output_token",
+    "max_output_tokens",
+    "maxoutputtoken",
+    "maxoutputtokens",
+    "token_count",
+    "token_counts",
+    "token_limit",
+    "token_limits",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+}
 _MAX_LOG_VALUE_LENGTH = 280
 
 
@@ -203,6 +237,27 @@ def _setup_api_logger() -> logging.Logger:
 API_LOGGER = _setup_api_logger()
 
 
+def _setup_translation_io_logger() -> logging.Logger:
+    logger = logging.getLogger("auto_subbed.translation_io")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    handler = RotatingFileHandler(
+        str(TRANSLATION_IO_LOG_FILE),
+        maxBytes=TRANSLATION_IO_LOG_MAX_BYTES,
+        backupCount=TRANSLATION_IO_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(fmt)
+    logger.addHandler(handler)
+    return logger
+
+
+TRANSLATION_IO_LOGGER = _setup_translation_io_logger()
+
+
 def _safe_log_value(value: Any) -> Any:
     if value is None or isinstance(value, (int, float, bool)):
         return value
@@ -216,6 +271,19 @@ def _safe_log_value(value: Any) -> Any:
     return text
 
 
+def _safe_translation_io_value(value: Any) -> Any:
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return _redact_translation_io_payload({str(k): v for k, v in value.items()})
+    if isinstance(value, list):
+        return [_safe_translation_io_value(v) for v in value]
+    text = str(value)
+    if len(text) > TRANSLATION_IO_MAX_VALUE_LENGTH:
+        return text[:TRANSLATION_IO_MAX_VALUE_LENGTH] + f"...(truncated,total={len(text)})"
+    return text
+
+
 def _mask_secret(value: Any) -> str:
     text = str(value or "")
     if not text:
@@ -225,15 +293,35 @@ def _mask_secret(value: Any) -> str:
     return text[:3] + "***" + text[-3:]
 
 
+def _is_sensitive_log_key(key: str) -> bool:
+    key_text = (key or "").strip().lower()
+    if key_text.startswith("has_"):
+        return False
+    normalized = key_text.replace("-", "_")
+    if normalized in _NON_SENSITIVE_TOKEN_KEYS:
+        return False
+    return any(marker in normalized for marker in _SENSITIVE_FIELD_MARKERS)
+
+
 def _redact_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     redacted: Dict[str, Any] = {}
     for key, value in payload.items():
-        key_text = str(key).lower()
-        is_sensitive = any(marker in key_text for marker in _SENSITIVE_FIELD_MARKERS) and not key_text.startswith("has_")
+        is_sensitive = _is_sensitive_log_key(str(key))
         if is_sensitive:
             redacted[str(key)] = _mask_secret(value)
         else:
             redacted[str(key)] = _safe_log_value(value)
+    return redacted
+
+
+def _redact_translation_io_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    redacted: Dict[str, Any] = {}
+    for key, value in payload.items():
+        is_sensitive = _is_sensitive_log_key(str(key))
+        if is_sensitive:
+            redacted[str(key)] = _mask_secret(value)
+        else:
+            redacted[str(key)] = _safe_translation_io_value(value)
     return redacted
 
 
@@ -245,12 +333,26 @@ def _log_api_event(event: str, **payload: Any) -> None:
         API_LOGGER.error(f"写入日志失败: {e}")
 
 
+def _log_translation_io(event: str, provider: str, **payload: Any) -> None:
+    try:
+        data = {"event": event, "provider": provider, **payload}
+        TRANSLATION_IO_LOGGER.info(
+            json.dumps(_redact_translation_io_payload(data), ensure_ascii=False, separators=(",", ":"))
+        )
+    except Exception as e:
+        API_LOGGER.error(f"写入翻译 IO 日志失败: {e}")
+
+
 _log_api_event(
     "log_init",
     log_file=str(API_LOG_FILE),
     crash_log_file=str(CRASH_LOG_FILE),
     max_bytes=API_LOG_MAX_BYTES,
     backup_count=API_LOG_BACKUP_COUNT,
+    translation_io_log_file=str(TRANSLATION_IO_LOG_FILE),
+    translation_io_max_bytes=TRANSLATION_IO_LOG_MAX_BYTES,
+    translation_io_backup_count=TRANSLATION_IO_LOG_BACKUP_COUNT,
+    translation_io_max_value_length=TRANSLATION_IO_MAX_VALUE_LENGTH,
 )
 
 
@@ -1492,9 +1594,30 @@ def translate_segments(
                 batch_texts.append(t)
                 chars += len(t)
                 pos += 1
+            req_id = f"deepl-{uuid.uuid4().hex[:10]}"
+            _log_translation_io(
+                "request",
+                "deepl",
+                request_id=req_id,
+                model="deepl-api",
+                mode="batch",
+                target_lang=deepl_target,
+                source_lang=(source_lang or "auto"),
+                batch_items=len(batch_texts),
+                request_texts=batch_texts,
+                request_kwargs=kwargs,
+            )
             try:
                 result = client.translate_text(batch_texts, **kwargs)
             except Exception as e:
+                _log_translation_io(
+                    "error",
+                    "deepl",
+                    request_id=req_id,
+                    model="deepl-api",
+                    mode="batch",
+                    error=str(e),
+                )
                 raise HTTPException(
                     status_code=500,
                     detail=f"翻译失败（deepl）: {e!s}",
@@ -1509,6 +1632,14 @@ def translate_segments(
                     status_code=500,
                     detail="翻译失败（deepl）: 返回结果数量与请求不一致",
                 )
+            _log_translation_io(
+                "response",
+                "deepl",
+                request_id=req_id,
+                model="deepl-api",
+                mode="batch",
+                response_texts=[item.text if hasattr(item, "text") else str(item) for item in translated_items],
+            )
             for (idx, seg, _), item in zip(batch_meta, translated_items):
                 translated = item.text if hasattr(item, "text") else str(item)
                 out[idx - 1] = {**seg, "text": translated}
@@ -1556,23 +1687,100 @@ def translate_segments(
         batch_max_items = _resolve_batch_size(translation_batch_size, default_batch_items, max_value=200)
         batch_max_chars = 2500 if gpt5_mode else 5000
 
-        def _openai_chat_create(**kwargs: Any) -> Any:
+        def _openai_token_limit_kwargs(limit: int) -> Dict[str, int]:
+            # gpt-5 系列在部分网关要求 max_completion_tokens，不接受 max_tokens
+            return {"max_completion_tokens": limit} if gpt5_mode else {"max_tokens": limit}
+
+        def _adjust_openai_kwargs_by_error(req_kwargs: Dict[str, Any], err_text: str) -> bool:
+            msg = (err_text or "").lower()
+            changed = False
+            # 兼容不支持 reasoning_effort 的网关实现
+            if "reasoning_effort" in msg and "reasoning_effort" in req_kwargs:
+                req_kwargs.pop("reasoning_effort", None)
+                changed = True
+            unsupported_hint = (
+                "unsupported parameter" in msg
+                or "not supported" in msg
+                or "unknown parameter" in msg
+                or "unrecognized request argument" in msg
+                or "invalid_request_error" in msg
+            )
+            if unsupported_hint:
+                # 双向兜底：不同中转实现对 token 字段支持不一致
+                if (
+                    "max_tokens" in req_kwargs
+                    and ("max_completion_tokens" in msg or "max completion tokens" in msg)
+                ):
+                    req_kwargs["max_completion_tokens"] = req_kwargs.pop("max_tokens")
+                    changed = True
+                elif (
+                    "max_completion_tokens" in req_kwargs
+                    and ("max_tokens" in msg or "max tokens" in msg)
+                ):
+                    req_kwargs["max_tokens"] = req_kwargs.pop("max_completion_tokens")
+                    changed = True
+            return changed
+
+        def _openai_chat_create_logged(*, req_id: str, mode: str, attempt: int, **kwargs: Any) -> Any:
+            req_kwargs = dict(kwargs)
             if reasoning_effort:
-                kwargs["reasoning_effort"] = reasoning_effort
+                req_kwargs["reasoning_effort"] = reasoning_effort
+            if gpt5_mode and "max_tokens" in req_kwargs and "max_completion_tokens" not in req_kwargs:
+                req_kwargs["max_completion_tokens"] = req_kwargs.pop("max_tokens")
+
+            compat_retry = 0
+            while True:
+                _log_translation_io(
+                    "request",
+                    "openai",
+                    request_id=req_id,
+                    mode=mode,
+                    attempt=attempt,
+                    compat_retry=compat_retry,
+                    model=model,
+                    base_url=(base_url or ""),
+                    reasoning_effort=(reasoning_effort or ""),
+                    request=req_kwargs,
+                )
+                try:
+                    resp = client.chat.completions.create(**req_kwargs)
+                    break
+                except Exception as e:
+                    err_text = str(e)
+                    _log_translation_io(
+                        "error",
+                        "openai",
+                        request_id=req_id,
+                        mode=mode,
+                        attempt=attempt,
+                        compat_retry=compat_retry,
+                        model=model,
+                        error=err_text,
+                    )
+                    if compat_retry < 2 and _adjust_openai_kwargs_by_error(req_kwargs, err_text):
+                        compat_retry += 1
+                        continue
+                    raise
+            raw_text = ""
+            finish_reason = ""
             try:
-                return client.chat.completions.create(**kwargs)
-            except TypeError as e:
-                # 兼容较老 SDK / 不支持该参数的中转
-                if "reasoning_effort" in str(e) and "reasoning_effort" in kwargs:
-                    kwargs.pop("reasoning_effort", None)
-                    return client.chat.completions.create(**kwargs)
-                raise
-            except Exception as e:
-                # 兼容仅服务端不支持该字段的中转实现
-                if "reasoning_effort" in str(e).lower() and "reasoning_effort" in kwargs:
-                    kwargs.pop("reasoning_effort", None)
-                    return client.chat.completions.create(**kwargs)
-                raise
+                raw_text = (resp.choices[0].message.content or "").strip()
+                finish_reason = (resp.choices[0].finish_reason or "")
+            except Exception:
+                raw_text = ""
+                finish_reason = ""
+            _log_translation_io(
+                "response",
+                "openai",
+                request_id=req_id,
+                mode=mode,
+                attempt=attempt,
+                compat_retry=compat_retry,
+                model=model,
+                finish_reason=finish_reason,
+                output=raw_text,
+            )
+            return resp
 
         def _parse_openai_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -1609,14 +1817,18 @@ def translate_segments(
                     f"Output only the translation in {lang_name}, no explanation."
                 )
             for attempt in range(2):
+                req_id = f"openai-single-{uuid.uuid4().hex[:10]}"
                 try:
-                    one_resp = _openai_chat_create(
+                    one_resp = _openai_chat_create_logged(
+                        req_id=req_id,
+                        mode="single",
+                        attempt=attempt + 1,
                         model=model,
                         messages=[
                             {"role": "system", "content": single_system},
                             {"role": "user", "content": src_text},
                         ],
-                        max_tokens=1024,
+                        **_openai_token_limit_kwargs(1024),
                         temperature=0,
                     )
                     return (one_resp.choices[0].message.content or "").strip() or src_text
@@ -1655,6 +1867,7 @@ def translate_segments(
                 )
             user_content = json.dumps(batch_texts, ensure_ascii=False)
             for attempt in range(2):
+                req_id = f"openai-batch-{uuid.uuid4().hex[:10]}"
                 try:
                     kwargs = dict(
                         model=model,
@@ -1662,22 +1875,33 @@ def translate_segments(
                             {"role": "system", "content": system_content},
                             {"role": "user", "content": user_content},
                         ],
-                        max_tokens=4096,
+                        **_openai_token_limit_kwargs(4096),
                         temperature=0,
                     )
                     # gpt-5 默认走非 strict，减少中转兼容问题
                     if gpt5_mode:
                         try:
-                            resp = _openai_chat_create(
+                            resp = _openai_chat_create_logged(
+                                req_id=req_id,
+                                mode="batch_json_object",
+                                attempt=attempt + 1,
                                 **kwargs,
                                 response_format={"type": "json_object"},
                             )
                         except Exception:
-                            resp = _openai_chat_create(**kwargs)
+                            resp = _openai_chat_create_logged(
+                                req_id=req_id,
+                                mode="batch_plain",
+                                attempt=attempt + 1,
+                                **kwargs,
+                            )
                     else:
                         # 其他模型优先 strict 结构化输出
                         try:
-                            resp = _openai_chat_create(
+                            resp = _openai_chat_create_logged(
+                                req_id=req_id,
+                                mode="batch_json_schema",
+                                attempt=attempt + 1,
                                 **kwargs,
                                 response_format={
                                     "type": "json_schema",
@@ -1702,12 +1926,20 @@ def translate_segments(
                             )
                         except Exception:
                             try:
-                                resp = _openai_chat_create(
+                                resp = _openai_chat_create_logged(
+                                    req_id=req_id,
+                                    mode="batch_json_object",
+                                    attempt=attempt + 1,
                                     **kwargs,
                                     response_format={"type": "json_object"},
                                 )
                             except Exception:
-                                resp = _openai_chat_create(**kwargs)
+                                resp = _openai_chat_create_logged(
+                                    req_id=req_id,
+                                    mode="batch_plain",
+                                    attempt=attempt + 1,
+                                    **kwargs,
+                                )
 
                     finish_reason = (resp.choices[0].finish_reason or "").lower()
                     if finish_reason == "length":
@@ -1723,6 +1955,15 @@ def translate_segments(
                             detail="OpenAI 请求过于频繁（限流）。请稍后再试，或在 platform.openai.com/account/limits 查看并提升用量/限流额度。",
                         ) from e
                 except Exception as e:
+                    _log_translation_io(
+                        "error",
+                        "openai",
+                        request_id=req_id,
+                        mode="batch_parse",
+                        attempt=attempt + 1,
+                        model=model,
+                        error=str(e),
+                    )
                     err_msg = str(e)
                     if "insufficient_quota" in err_msg.lower() or "quota" in err_msg.lower():
                         raise HTTPException(
@@ -1842,6 +2083,50 @@ def translate_segments(
                 raise ValueError("Moonshot 返回 items 数量与请求不一致")
             return [str(x).strip() if x is not None else "" for x in items]
 
+        def _moonshot_chat_create_logged(*, req_id: str, mode: str, attempt: int, **kwargs: Any) -> Any:
+            _log_translation_io(
+                "request",
+                "moonshot",
+                request_id=req_id,
+                mode=mode,
+                attempt=attempt,
+                model=model,
+                base_url=(base_url or ""),
+                request=kwargs,
+            )
+            try:
+                resp = client.chat.completions.create(**kwargs)
+            except Exception as e:
+                _log_translation_io(
+                    "error",
+                    "moonshot",
+                    request_id=req_id,
+                    mode=mode,
+                    attempt=attempt,
+                    model=model,
+                    error=str(e),
+                )
+                raise
+            raw_text = ""
+            finish_reason = ""
+            try:
+                raw_text = (resp.choices[0].message.content or "").strip()
+                finish_reason = (resp.choices[0].finish_reason or "")
+            except Exception:
+                raw_text = ""
+                finish_reason = ""
+            _log_translation_io(
+                "response",
+                "moonshot",
+                request_id=req_id,
+                mode=mode,
+                attempt=attempt,
+                model=model,
+                finish_reason=finish_reason,
+                output=raw_text,
+            )
+            return resp
+
         def _single_translate(src_text: str) -> str:
             single_system = f"You are a translator. Output only the translation in {lang_name}, no explanation."
             if rules:
@@ -1850,8 +2135,12 @@ def translate_segments(
                     f"Output only the translation in {lang_name}, no explanation."
                 )
             for attempt in range(2):
+                req_id = f"moonshot-single-{uuid.uuid4().hex[:10]}"
                 try:
-                    one_resp = client.chat.completions.create(
+                    one_resp = _moonshot_chat_create_logged(
+                        req_id=req_id,
+                        mode="single",
+                        attempt=attempt + 1,
                         model=model,
                         messages=[
                             {"role": "system", "content": single_system},
@@ -1902,6 +2191,7 @@ def translate_segments(
                 )
             user_content = json.dumps(batch_texts, ensure_ascii=False)
             for attempt in range(2):
+                req_id = f"moonshot-batch-{uuid.uuid4().hex[:10]}"
                 try:
                     kwargs = dict(
                         model=model,
@@ -1914,12 +2204,20 @@ def translate_segments(
                     )
                     try:
                         # Moonshot 文档中 response_format 支持 json_object，未声明 json_schema
-                        resp = client.chat.completions.create(
+                        resp = _moonshot_chat_create_logged(
+                            req_id=req_id,
+                            mode="batch_json_object",
+                            attempt=attempt + 1,
                             **kwargs,
                             response_format={"type": "json_object"},
                         )
                     except Exception:
-                        resp = client.chat.completions.create(**kwargs)
+                        resp = _moonshot_chat_create_logged(
+                            req_id=req_id,
+                            mode="batch_plain",
+                            attempt=attempt + 1,
+                            **kwargs,
+                        )
 
                     finish_reason = (resp.choices[0].finish_reason or "").lower()
                     if finish_reason == "length":
@@ -1935,6 +2233,15 @@ def translate_segments(
                             detail="Moonshot 请求过于频繁（限流）。请稍后再试，或检查平台配额限制。",
                         ) from e
                 except Exception as e:
+                    _log_translation_io(
+                        "error",
+                        "moonshot",
+                        request_id=req_id,
+                        mode="batch_parse",
+                        attempt=attempt + 1,
+                        model=model,
+                        error=str(e),
+                    )
                     err_msg = str(e).lower()
                     if "insufficient_quota" in err_msg or "quota" in err_msg:
                         raise HTTPException(
@@ -2127,6 +2434,20 @@ def translate_segments(
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 "generationConfig": generation_cfg,
             }
+            req_id = f"gemini-relay-{uuid.uuid4().hex[:10]}"
+            _log_translation_io(
+                "request",
+                "gemini",
+                request_id=req_id,
+                mode="relay_generate_content",
+                via_relay=True,
+                model=model,
+                relay_base_url=relay_base_url,
+                endpoint=url,
+                max_output_tokens=max_output_tokens,
+                json_mode=json_mode,
+                request_payload=payload,
+            )
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             req = urllib.request.Request(
                 url,
@@ -2145,7 +2466,27 @@ def translate_segments(
                 obj = json.loads(body) if body else {}
                 text = _extract_gemini_text(obj)
                 if text:
+                    _log_translation_io(
+                        "response",
+                        "gemini",
+                        request_id=req_id,
+                        mode="relay_generate_content",
+                        via_relay=True,
+                        model=model,
+                        output=text,
+                        raw_response=body,
+                    )
                     return text
+                _log_translation_io(
+                    "error",
+                    "gemini",
+                    request_id=req_id,
+                    mode="relay_generate_content",
+                    via_relay=True,
+                    model=model,
+                    error="Gemini Relay 返回内容为空",
+                    raw_response=body,
+                )
                 raise RuntimeError(f"Gemini Relay 返回内容为空：{_short_error(body)}")
             except urllib.error.HTTPError as e:
                 err_body = ""
@@ -2153,6 +2494,17 @@ def translate_segments(
                     err_body = e.read().decode("utf-8", errors="replace")
                 except Exception:
                     err_body = ""
+                _log_translation_io(
+                    "error",
+                    "gemini",
+                    request_id=req_id,
+                    mode="relay_generate_content",
+                    via_relay=True,
+                    model=model,
+                    status_code=e.code,
+                    error=str(e),
+                    raw_response=err_body,
+                )
                 err_text = _short_error(f"HTTP {e.code} {err_body}")
                 err_lc = err_text.lower()
                 if e.code in (401, 403) or _is_auth_error(err_lc):
@@ -2177,7 +2529,27 @@ def translate_segments(
                     ) from e
                 raise RuntimeError(f"Gemini Relay 请求失败：{err_text}") from e
             except urllib.error.URLError as e:
+                _log_translation_io(
+                    "error",
+                    "gemini",
+                    request_id=req_id,
+                    mode="relay_generate_content",
+                    via_relay=True,
+                    model=model,
+                    error=str(e),
+                )
                 raise RuntimeError(f"Gemini Relay 网络请求失败：{_short_error(e)}") from e
+            except Exception as e:
+                _log_translation_io(
+                    "error",
+                    "gemini",
+                    request_id=req_id,
+                    mode="relay_generate_content",
+                    via_relay=True,
+                    model=model,
+                    error=str(e),
+                )
+                raise
 
         def _parse_gemini_batch_json(raw_text: str, expected_len: int) -> List[str]:
             raw = (raw_text or "").strip()
@@ -2219,10 +2591,35 @@ def translate_segments(
                     f"Text:\n{src_text}"
                 )
             for attempt in range(2):
+                req_id = f"gemini-single-{uuid.uuid4().hex[:10]}"
+                _log_translation_io(
+                    "request",
+                    "gemini",
+                    request_id=req_id,
+                    mode="single",
+                    attempt=attempt + 1,
+                    model=model,
+                    via_relay=use_relay,
+                    thinking_level=(thinking_level or ""),
+                    max_output_tokens=2048,
+                    json_mode=False,
+                    prompt=single_prompt,
+                )
                 try:
                     if use_relay:
                         raw = _relay_generate_content(single_prompt, max_output_tokens=2048, json_mode=False)
-                        return raw.strip() or src_text
+                        translated = raw.strip() or src_text
+                        _log_translation_io(
+                            "response",
+                            "gemini",
+                            request_id=req_id,
+                            mode="single",
+                            attempt=attempt + 1,
+                            model=model,
+                            via_relay=use_relay,
+                            output=translated,
+                        )
+                        return translated
                     config_one: Dict[str, Any] = {"temperature": 0, "max_output_tokens": 2048}
                     if thinking_level:
                         config_one["thinking_config"] = {"thinking_level": thinking_level}
@@ -2231,8 +2628,29 @@ def translate_segments(
                         contents=single_prompt,
                         config=config_one,
                     )
-                    return _extract_gemini_text(one_resp).strip() or src_text
+                    translated = _extract_gemini_text(one_resp).strip() or src_text
+                    _log_translation_io(
+                        "response",
+                        "gemini",
+                        request_id=req_id,
+                        mode="single",
+                        attempt=attempt + 1,
+                        model=model,
+                        via_relay=use_relay,
+                        output=translated,
+                    )
+                    return translated
                 except Exception as e:
+                    _log_translation_io(
+                        "error",
+                        "gemini",
+                        request_id=req_id,
+                        mode="single",
+                        attempt=attempt + 1,
+                        model=model,
+                        via_relay=use_relay,
+                        error=str(e),
+                    )
                     msg = str(e).lower()
                     if "429" in msg or "resource_exhausted" in msg or "rate limit" in msg or "too many requests" in msg:
                         if attempt < 1:
@@ -2291,6 +2709,22 @@ def translate_segments(
                 )
 
             for attempt in range(2):
+                req_id = f"gemini-batch-{uuid.uuid4().hex[:10]}"
+                _log_translation_io(
+                    "request",
+                    "gemini",
+                    request_id=req_id,
+                    mode="batch",
+                    attempt=attempt + 1,
+                    model=model,
+                    via_relay=use_relay,
+                    relay_base_url=relay_base_url if use_relay else "",
+                    thinking_level=(thinking_level or ""),
+                    batch_items=expected_len,
+                    max_output_tokens=8192,
+                    json_mode=True,
+                    prompt=prompt,
+                )
                 try:
                     if use_relay:
                         raw = _relay_generate_content(prompt, max_output_tokens=8192, json_mode=True)
@@ -2308,14 +2742,51 @@ def translate_segments(
                                 contents=prompt,
                                 config={**config_base, "response_json_schema": schema},
                             )
-                        except Exception:
+                            raw = _extract_gemini_text(resp)
+                            _log_translation_io(
+                                "response",
+                                "gemini",
+                                request_id=req_id,
+                                mode="batch_schema",
+                                attempt=attempt + 1,
+                                model=model,
+                                output=raw,
+                            )
+                        except Exception as schema_error:
+                            _log_translation_io(
+                                "error",
+                                "gemini",
+                                request_id=req_id,
+                                mode="batch_schema",
+                                attempt=attempt + 1,
+                                model=model,
+                                error=f"schema 模式失败，回退到非 schema 请求：{schema_error}",
+                            )
                             resp = client.models.generate_content(
                                 model=model,
                                 contents=prompt,
                                 config=config_base,
                             )
-                        raw = _extract_gemini_text(resp)
+                            raw = _extract_gemini_text(resp)
+                            _log_translation_io(
+                                "response",
+                                "gemini",
+                                request_id=req_id,
+                                mode="batch_no_schema",
+                                attempt=attempt + 1,
+                                model=model,
+                                output=raw,
+                            )
                     parsed = _parse_gemini_batch_json(raw, expected_len)
+                    _log_translation_io(
+                        "response",
+                        "gemini",
+                        request_id=req_id,
+                        mode="batch_parsed",
+                        attempt=attempt + 1,
+                        model=model,
+                        output=parsed,
+                    )
                     _log_api_event(
                         "gemini_batch_ok",
                         model=model,
@@ -2326,6 +2797,16 @@ def translate_segments(
                 except Exception as e:
                     err_msg = str(e)
                     err_lc = err_msg.lower()
+                    _log_translation_io(
+                        "error",
+                        "gemini",
+                        request_id=req_id,
+                        mode="batch",
+                        attempt=attempt + 1,
+                        model=model,
+                        via_relay=use_relay,
+                        error=err_msg,
+                    )
                     _log_api_event(
                         "gemini_batch_error",
                         model=model,
@@ -2449,12 +2930,30 @@ def translate_segments(
             batch_meta = pending[pos: pos + batch_max_items]
             batch_texts = [x[2] for x in batch_meta]
             pos += len(batch_meta)
+            req_id = f"google-{uuid.uuid4().hex[:10]}"
+            _log_translation_io(
+                "request",
+                "google",
+                request_id=req_id,
+                mode="batch",
+                target_lang=target,
+                source_lang=(source_lang or "auto"),
+                batch_items=len(batch_texts),
+                request_texts=batch_texts,
+            )
             try:
                 if hasattr(translator, "translate_batch"):
                     translated_items = translator.translate_batch(batch_texts)
                 else:
                     translated_items = [translator.translate(t) for t in batch_texts]
             except Exception as e:
+                _log_translation_io(
+                    "error",
+                    "google",
+                    request_id=req_id,
+                    mode="batch",
+                    error=str(e),
+                )
                 raise HTTPException(
                     status_code=500,
                     detail=f"翻译失败（{api_name}）: {e!s}",
@@ -2466,6 +2965,13 @@ def translate_segments(
                     status_code=500,
                     detail="翻译失败（google）: 返回结果数量与请求不一致",
                 )
+            _log_translation_io(
+                "response",
+                "google",
+                request_id=req_id,
+                mode="batch",
+                response_texts=[str(x) for x in translated_items],
+            )
             for (_, seg, src_text), translated in zip(batch_meta, translated_items):
                 out.append({**seg, "text": (translated or src_text)})
                 done += 1
