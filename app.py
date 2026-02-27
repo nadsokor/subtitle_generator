@@ -1687,49 +1687,80 @@ def translate_segments(
         batch_max_items = _resolve_batch_size(translation_batch_size, default_batch_items, max_value=200)
         batch_max_chars = 2500 if gpt5_mode else 5000
 
-        def _openai_chat_create(**kwargs: Any) -> Any:
-            if reasoning_effort:
-                kwargs["reasoning_effort"] = reasoning_effort
-            try:
-                return client.chat.completions.create(**kwargs)
-            except TypeError as e:
-                # 兼容较老 SDK / 不支持该参数的中转
-                if "reasoning_effort" in str(e) and "reasoning_effort" in kwargs:
-                    kwargs.pop("reasoning_effort", None)
-                    return client.chat.completions.create(**kwargs)
-                raise
-            except Exception as e:
-                # 兼容仅服务端不支持该字段的中转实现
-                if "reasoning_effort" in str(e).lower() and "reasoning_effort" in kwargs:
-                    kwargs.pop("reasoning_effort", None)
-                    return client.chat.completions.create(**kwargs)
-                raise
+        def _openai_token_limit_kwargs(limit: int) -> Dict[str, int]:
+            # gpt-5 系列在部分网关要求 max_completion_tokens，不接受 max_tokens
+            return {"max_completion_tokens": limit} if gpt5_mode else {"max_tokens": limit}
+
+        def _adjust_openai_kwargs_by_error(req_kwargs: Dict[str, Any], err_text: str) -> bool:
+            msg = (err_text or "").lower()
+            changed = False
+            # 兼容不支持 reasoning_effort 的网关实现
+            if "reasoning_effort" in msg and "reasoning_effort" in req_kwargs:
+                req_kwargs.pop("reasoning_effort", None)
+                changed = True
+            unsupported_hint = (
+                "unsupported parameter" in msg
+                or "not supported" in msg
+                or "unknown parameter" in msg
+                or "unrecognized request argument" in msg
+                or "invalid_request_error" in msg
+            )
+            if unsupported_hint:
+                # 双向兜底：不同中转实现对 token 字段支持不一致
+                if (
+                    "max_tokens" in req_kwargs
+                    and ("max_completion_tokens" in msg or "max completion tokens" in msg)
+                ):
+                    req_kwargs["max_completion_tokens"] = req_kwargs.pop("max_tokens")
+                    changed = True
+                elif (
+                    "max_completion_tokens" in req_kwargs
+                    and ("max_tokens" in msg or "max tokens" in msg)
+                ):
+                    req_kwargs["max_tokens"] = req_kwargs.pop("max_completion_tokens")
+                    changed = True
+            return changed
 
         def _openai_chat_create_logged(*, req_id: str, mode: str, attempt: int, **kwargs: Any) -> Any:
-            _log_translation_io(
-                "request",
-                "openai",
-                request_id=req_id,
-                mode=mode,
-                attempt=attempt,
-                model=model,
-                base_url=(base_url or ""),
-                reasoning_effort=(reasoning_effort or ""),
-                request=kwargs,
-            )
-            try:
-                resp = _openai_chat_create(**kwargs)
-            except Exception as e:
+            req_kwargs = dict(kwargs)
+            if reasoning_effort:
+                req_kwargs["reasoning_effort"] = reasoning_effort
+            if gpt5_mode and "max_tokens" in req_kwargs and "max_completion_tokens" not in req_kwargs:
+                req_kwargs["max_completion_tokens"] = req_kwargs.pop("max_tokens")
+
+            compat_retry = 0
+            while True:
                 _log_translation_io(
-                    "error",
+                    "request",
                     "openai",
                     request_id=req_id,
                     mode=mode,
                     attempt=attempt,
+                    compat_retry=compat_retry,
                     model=model,
-                    error=str(e),
+                    base_url=(base_url or ""),
+                    reasoning_effort=(reasoning_effort or ""),
+                    request=req_kwargs,
                 )
-                raise
+                try:
+                    resp = client.chat.completions.create(**req_kwargs)
+                    break
+                except Exception as e:
+                    err_text = str(e)
+                    _log_translation_io(
+                        "error",
+                        "openai",
+                        request_id=req_id,
+                        mode=mode,
+                        attempt=attempt,
+                        compat_retry=compat_retry,
+                        model=model,
+                        error=err_text,
+                    )
+                    if compat_retry < 2 and _adjust_openai_kwargs_by_error(req_kwargs, err_text):
+                        compat_retry += 1
+                        continue
+                    raise
             raw_text = ""
             finish_reason = ""
             try:
@@ -1744,6 +1775,7 @@ def translate_segments(
                 request_id=req_id,
                 mode=mode,
                 attempt=attempt,
+                compat_retry=compat_retry,
                 model=model,
                 finish_reason=finish_reason,
                 output=raw_text,
@@ -1796,7 +1828,7 @@ def translate_segments(
                             {"role": "system", "content": single_system},
                             {"role": "user", "content": src_text},
                         ],
-                        max_tokens=1024,
+                        **_openai_token_limit_kwargs(1024),
                         temperature=0,
                     )
                     return (one_resp.choices[0].message.content or "").strip() or src_text
@@ -1843,7 +1875,7 @@ def translate_segments(
                             {"role": "system", "content": system_content},
                             {"role": "user", "content": user_content},
                         ],
-                        max_tokens=4096,
+                        **_openai_token_limit_kwargs(4096),
                         temperature=0,
                     )
                     # gpt-5 默认走非 strict，减少中转兼容问题
