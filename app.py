@@ -47,6 +47,10 @@ ALLOWED_EXTENSIONS = {
     ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma",
 }
 
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
+}
+
 # Whisper 可用模型（按体积与精度）
 WHISPER_MODELS = [
     "tiny", "tiny.en",
@@ -1048,6 +1052,126 @@ def _get_media_duration(path: str) -> Optional[float]:
         return None
 
 
+def _is_video_input(path: str) -> bool:
+    return Path(path).suffix.lower() in VIDEO_EXTENSIONS
+
+
+def _parse_ffprobe_rate(rate_text: str) -> float:
+    text = (rate_text or "").strip()
+    if not text or text in ("0/0", "N/A"):
+        return 0.0
+    if "/" in text:
+        num_text, den_text = text.split("/", 1)
+        num = float(num_text)
+        den = float(den_text)
+        if den == 0:
+            return 0.0
+        return num / den
+    return float(text)
+
+
+def _detect_vfr(path: str) -> Tuple[bool, str]:
+    """
+    检测输入视频是否为 VFR。
+    返回 (is_vfr, reason)。
+    """
+    # 先做轻量检测：avg_frame_rate 与 r_frame_rate 明显不一致时直接判定 VFR。
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate,r_frame_rate",
+                "-of",
+                "default=nw=1:nk=1",
+                path,
+            ],
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8", errors="replace")
+        rates = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        if len(rates) >= 2:
+            avg_fps = _parse_ffprobe_rate(rates[0])
+            real_fps = _parse_ffprobe_rate(rates[1])
+            if avg_fps > 0 and real_fps > 0:
+                diff = abs(avg_fps - real_fps)
+                if diff > 0.02:
+                    return True, f"avg_fps={avg_fps:.3f}, real_fps={real_fps:.3f}"
+    except Exception:
+        pass
+
+    # 兜底检测：vfrdet 采样前 3 分钟，速度与准确性平衡。
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-v",
+                "info",
+                "-t",
+                "180",
+                "-i",
+                path,
+                "-vf",
+                "vfrdet",
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        stderr_text = proc.stderr or ""
+        # 典型输出：VFR:0.123456 (xx/yy)
+        m = re.search(r"VFR:\s*([0-9]*\.?[0-9]+)", stderr_text)
+        if m:
+            ratio = float(m.group(1))
+            if ratio > 0.001:
+                return True, f"vfrdet={ratio:.6f}"
+            return False, f"vfrdet={ratio:.6f}"
+    except Exception:
+        pass
+
+    return False, "未检测到明显 VFR 特征"
+
+
+def _normalize_audio_timeline(
+    input_path: str,
+    work_dir: str,
+) -> str:
+    """
+    归一化输入时间轴并导出为 16k 单声道 wav，尽量消除 VFR/时间基导致的漂移。
+    """
+    normalized_wav = os.path.join(work_dir, "purfview_input_norm.wav")
+    _run_cmd(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-c:a",
+            "pcm_s16le",
+            normalized_wav,
+        ]
+    )
+    return normalized_wav
+
+
 def _split_audio(
     input_path: str,
     work_dir: str,
@@ -1187,12 +1311,63 @@ def _process_job(
             }
             _update_job(job_id, stage="transcribing", progress=0, message="转写中 0%", eta_seconds=None)
         else:
-            _update_job(job_id, stage="transcribing", progress=None, message="转写中（Purfview XXL 不支持进度）", eta_seconds=None)
+            _update_job(job_id, stage="preprocessing", progress=0, message="预处理中：准备检测时间轴…", eta_seconds=None)
 
         work_dir = tempfile.mkdtemp(prefix="auto_subbed_")
         if engine == "purfview-xxl":
+            purfview_input_path = input_path
+            if _is_video_input(input_path):
+                _update_job(
+                    job_id,
+                    stage="preprocessing",
+                    progress=0,
+                    message="预处理中：检测视频是否 VFR…",
+                    eta_seconds=None,
+                )
+                is_vfr, vfr_reason = _detect_vfr(input_path)
+                _log_api_event(
+                    "purfview_vfr_detect",
+                    job_id=job_id,
+                    is_vfr=is_vfr,
+                    reason=vfr_reason,
+                )
+                if cancel_event and cancel_event.is_set():
+                    raise JobCanceled("任务已取消")
+                if is_vfr:
+                    _update_job(
+                        job_id,
+                        stage="preprocessing",
+                        progress=0,
+                        message="预处理中：检测到 VFR，正在做音频时间轴归一化…",
+                        eta_seconds=None,
+                    )
+                    purfview_input_path = _normalize_audio_timeline(input_path, work_dir)
+                    _update_job(
+                        job_id,
+                        stage="preprocessing",
+                        progress=0,
+                        message="预处理完成：已归一化时间轴，开始转写…",
+                        eta_seconds=None,
+                    )
+                else:
+                    _update_job(
+                        job_id,
+                        stage="preprocessing",
+                        progress=0,
+                        message="预处理中：未检测到 VFR，跳过归一化，开始转写…",
+                        eta_seconds=None,
+                    )
+            else:
+                _update_job(
+                    job_id,
+                    stage="preprocessing",
+                    progress=0,
+                    message="预处理中：输入为音频，跳过 VFR 检测，开始转写…",
+                    eta_seconds=None,
+                )
+            _update_job(job_id, stage="transcribing", progress=None, message="转写中（Purfview XXL 不支持进度）", eta_seconds=None)
             srt_original_content = _run_purfview_xxl_transcribe(
-                input_path,
+                purfview_input_path,
                 model_name,
                 language,
                 work_dir,
