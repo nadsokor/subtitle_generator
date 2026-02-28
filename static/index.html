@@ -436,6 +436,14 @@
           </select>
         </div>
         <div class="field">
+          <label for="purfviewTimelineMode">时间轴归一化（可选）</label>
+          <select id="purfviewTimelineMode">
+            <option value="auto" selected>自动（仅检测到 VFR 时归一化）</option>
+            <option value="always">总是归一化（更稳，稍慢）</option>
+            <option value="never">从不归一化（更快）</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="purfviewVadMethod">Purfview VAD 方法（可选）</label>
           <input type="text" id="purfviewVadMethod" placeholder="例如：ten / silero_v6_fw / pyannote_v3" autocomplete="off" />
         </div>
@@ -640,6 +648,7 @@
     const language = document.getElementById("language");
     const engineConfigPurfview = document.getElementById("engineConfigPurfview");
     const purfviewVadMode = document.getElementById("purfviewVadMode");
+    const purfviewTimelineMode = document.getElementById("purfviewTimelineMode");
     const purfviewVadMethod = document.getElementById("purfviewVadMethod");
     const purfviewBatchSize = document.getElementById("purfviewBatchSize");
     const purfviewBeamSize = document.getElementById("purfviewBeamSize");
@@ -841,6 +850,7 @@
         if (data.translate_to) translateTo.value = data.translate_to;
         if (data.parallel_file_count) parallelFileCount.value = data.parallel_file_count;
         if (data.purfview_vad_mode) purfviewVadMode.value = data.purfview_vad_mode;
+        if (data.purfview_timeline_mode) purfviewTimelineMode.value = data.purfview_timeline_mode;
         if (data.purfview_vad_method != null) purfviewVadMethod.value = data.purfview_vad_method;
         if (data.purfview_batch_size) purfviewBatchSize.value = data.purfview_batch_size;
         if (data.purfview_beam_size) purfviewBeamSize.value = data.purfview_beam_size;
@@ -858,6 +868,7 @@
           translate_to: translateTo.value,
           parallel_file_count: parallelFileCount.value.trim(),
           purfview_vad_mode: purfviewVadMode.value,
+          purfview_timeline_mode: purfviewTimelineMode.value || "auto",
           purfview_vad_method: purfviewVadMethod.value.trim(),
           purfview_batch_size: purfviewBatchSize.value.trim(),
           purfview_beam_size: purfviewBeamSize.value.trim(),
@@ -942,6 +953,7 @@
     parallelFileCount.addEventListener("change", saveSettings);
     parallelFileCount.addEventListener("blur", saveSettings);
     purfviewVadMode.addEventListener("change", saveSettings);
+    purfviewTimelineMode.addEventListener("change", saveSettings);
     purfviewVadMethod.addEventListener("change", saveSettings);
     purfviewVadMethod.addEventListener("blur", saveSettings);
     purfviewBatchSize.addEventListener("change", saveSettings);
@@ -1213,6 +1225,7 @@
         form.append("language", language.value);
         if (engine.value === "purfview-xxl") {
           form.append("purfview_vad_mode", purfviewVadMode.value || "auto");
+          form.append("purfview_timeline_mode", purfviewTimelineMode.value || "auto");
           if (purfviewVadMethod.value.trim()) form.append("purfview_vad_method", purfviewVadMethod.value.trim());
           const pBatch = parseInt(purfviewBatchSize.value, 10);
           if (Number.isFinite(pBatch) && pBatch > 0) form.append("purfview_batch_size", String(pBatch));

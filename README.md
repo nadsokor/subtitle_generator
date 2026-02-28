@@ -81,8 +81,12 @@ uvicorn app:app --host 0.0.0.0 --port 8765
 2. 在页面中**选择或拖拽**视频/音频文件
 3. 选择 **Whisper 模型**：体积越大精度越高、速度越慢（如 `base` 平衡速度与效果）
    - **识别引擎**：可选 Whisper 原版、faster-whisper（更快）或 Purfview XXL（exe）
-   - 选 **Purfview XXL（exe）** 时，可配置 `VAD`、`VAD 方法`、`Batch Size`、`Beam Size`
+  - 选 **Purfview XXL（exe）** 时，可配置 `VAD`、`VAD 方法`、`Batch Size`、`Beam Size`、`时间轴归一化`
 4. 选择 **字幕语言**：若已知语种可指定，否则选「自动检测」
+   - 若识别引擎为 **Purfview XXL（exe）**，可配置「时间轴归一化」：
+     - `自动`：先检测视频是否 VFR，仅在检测到 VFR 时归一化（默认）
+     - `总是归一化`：不检测，直接归一化（更稳但会稍慢）
+     - `从不归一化`：不检测，直接转写（更快）
 5. （可选）**翻译**：
    - 在「翻译 API」中选 Google / DeepL / OpenAI / Gemini / Moonshot，在「翻译成」中选目标语言
    - 选 OpenAI / Gemini / Moonshot 时可在「API 配置」中填写 API Key、选择模型（含「自定义」输入模型名），以及「翻译风格与规则」
@@ -163,7 +167,8 @@ auto_subbed/
 ## 技术说明
 
 - **后端**：FastAPI + OpenAI Whisper（`openai-whisper`）+ 翻译（`deep-translator`：Google，`deepl`：DeepL，`openai`：OpenAI/Moonshot Chat Completions，`google-genai`：Gemini）
-- **Purfview XXL（可选）**：将 `faster-whisper-xxl.exe` 放到 `app.py` 同级的 `.models/purfview-xxl/`，选择引擎为 `Purfview XXL（exe）` 即可调用；支持在前端设置 VAD / Batch Size / Beam Size 等参数
+- **Purfview XXL（可选）**：将 `faster-whisper-xxl.exe` 放到 `app.py` 同级的 `.models/purfview-xxl/`，选择引擎为 `Purfview XXL（exe）` 即可调用；支持在前端设置 VAD / Batch Size / Beam Size / 时间轴归一化等参数
+- **VFR 兼容策略（Purfview）**：当时间轴归一化为 `自动` 时，后端会先检测 VFR（`ffprobe` + `vfrdet`），命中后自动做 `aresample=async=1:first_pts=0` 音频时间轴归一化，再交给 Purfview 转写；处理状态会实时显示在前端
 - **前端**：单页 HTML + 原生 JS，无构建步骤；配置与 API Key 使用 localStorage 持久化
 - **ffmpeg**：优先使用系统 PATH；若无则从 BtbN（Windows/Linux）或 evermeet（macOS）下载并解压到 `.ffmpeg/<平台>`，仅当前进程 PATH 生效
 - **任务流程**：提交后异步执行（下载模型 → 转写 → 可选翻译），前端轮询任务状态并展示进度与预计剩余时间

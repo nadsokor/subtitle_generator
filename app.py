@@ -1260,6 +1260,7 @@ def _process_job(
     purfview_vad_method: str,
     purfview_batch_size: int,
     purfview_beam_size: int,
+    purfview_timeline_mode: str,
     translation_rules: str,
     translation_batch_size: int,
     base_name: str = "",
@@ -1317,28 +1318,12 @@ def _process_job(
         if engine == "purfview-xxl":
             purfview_input_path = input_path
             if _is_video_input(input_path):
-                _update_job(
-                    job_id,
-                    stage="preprocessing",
-                    progress=0,
-                    message="预处理中：检测视频是否 VFR…",
-                    eta_seconds=None,
-                )
-                is_vfr, vfr_reason = _detect_vfr(input_path)
-                _log_api_event(
-                    "purfview_vfr_detect",
-                    job_id=job_id,
-                    is_vfr=is_vfr,
-                    reason=vfr_reason,
-                )
-                if cancel_event and cancel_event.is_set():
-                    raise JobCanceled("任务已取消")
-                if is_vfr:
+                if purfview_timeline_mode == "always":
                     _update_job(
                         job_id,
                         stage="preprocessing",
                         progress=0,
-                        message="预处理中：检测到 VFR，正在做音频时间轴归一化…",
+                        message="预处理中：按设置始终归一化时间轴，正在处理音频…",
                         eta_seconds=None,
                     )
                     purfview_input_path = _normalize_audio_timeline(input_path, work_dir)
@@ -1349,14 +1334,68 @@ def _process_job(
                         message="预处理完成：已归一化时间轴，开始转写…",
                         eta_seconds=None,
                     )
+                    _log_api_event(
+                        "purfview_timeline_mode",
+                        job_id=job_id,
+                        mode=purfview_timeline_mode,
+                        action="normalized",
+                    )
+                elif purfview_timeline_mode == "never":
+                    _update_job(
+                        job_id,
+                        stage="preprocessing",
+                        progress=0,
+                        message="预处理中：按设置跳过时间轴归一化，开始转写…",
+                        eta_seconds=None,
+                    )
+                    _log_api_event(
+                        "purfview_timeline_mode",
+                        job_id=job_id,
+                        mode=purfview_timeline_mode,
+                        action="skipped",
+                    )
                 else:
                     _update_job(
                         job_id,
                         stage="preprocessing",
                         progress=0,
-                        message="预处理中：未检测到 VFR，跳过归一化，开始转写…",
+                        message="预处理中：检测视频是否 VFR…",
                         eta_seconds=None,
                     )
+                    is_vfr, vfr_reason = _detect_vfr(input_path)
+                    _log_api_event(
+                        "purfview_vfr_detect",
+                        job_id=job_id,
+                        is_vfr=is_vfr,
+                        reason=vfr_reason,
+                        mode=purfview_timeline_mode,
+                    )
+                    if cancel_event and cancel_event.is_set():
+                        raise JobCanceled("任务已取消")
+                    if is_vfr:
+                        _update_job(
+                            job_id,
+                            stage="preprocessing",
+                            progress=0,
+                            message="预处理中：检测到 VFR，正在做音频时间轴归一化…",
+                            eta_seconds=None,
+                        )
+                        purfview_input_path = _normalize_audio_timeline(input_path, work_dir)
+                        _update_job(
+                            job_id,
+                            stage="preprocessing",
+                            progress=0,
+                            message="预处理完成：已归一化时间轴，开始转写…",
+                            eta_seconds=None,
+                        )
+                    else:
+                        _update_job(
+                            job_id,
+                            stage="preprocessing",
+                            progress=0,
+                            message="预处理中：未检测到 VFR，跳过归一化，开始转写…",
+                            eta_seconds=None,
+                        )
             else:
                 _update_job(
                     job_id,
@@ -1676,6 +1715,17 @@ def _normalize_purfview_vad_method(value: Optional[str]) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", method):
         raise HTTPException(status_code=400, detail="Purfview VAD 方法不合法，请仅使用字母/数字/._-")
     return method
+
+
+def _normalize_purfview_timeline_mode(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if raw in ("", "auto", "default"):
+        return "auto"
+    if raw in ("always", "on", "true", "1", "yes", "enabled"):
+        return "always"
+    if raw in ("never", "off", "false", "0", "no", "disabled"):
+        return "never"
+    raise HTTPException(status_code=400, detail="时间轴归一化选项不合法。可用值：auto / always / never")
 
 
 def _resolve_optional_positive_int(value: Optional[int], *, min_value: int, max_value: int) -> int:
@@ -3257,6 +3307,7 @@ async def transcribe_video(
     purfview_vad_method: str = Form(""),
     purfview_batch_size: int = Form(0),
     purfview_beam_size: int = Form(0),
+    purfview_timeline_mode: str = Form("auto"),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
@@ -3283,6 +3334,7 @@ async def transcribe_video(
     pv_vad_method = _normalize_purfview_vad_method(purfview_vad_method)
     pv_batch_size = _resolve_optional_positive_int(purfview_batch_size, min_value=1, max_value=256)
     pv_beam_size = _resolve_optional_positive_int(purfview_beam_size, min_value=1, max_value=32)
+    pv_timeline_mode = _normalize_purfview_timeline_mode(purfview_timeline_mode)
 
     available, _, path_or_error = check_ffmpeg_available()
     if not available:
@@ -3330,6 +3382,7 @@ async def transcribe_video(
         purfview_vad_method=pv_vad_method if engine == "purfview-xxl" else "",
         purfview_batch_size=pv_batch_size if engine == "purfview-xxl" else 0,
         purfview_beam_size=pv_beam_size if engine == "purfview-xxl" else 0,
+        purfview_timeline_mode=pv_timeline_mode if engine == "purfview-xxl" else "",
         translation_batch_size=translation_batch_size,
         has_translation_rules=bool((translation_rules or "").strip()),
         has_openai_api_key=bool((openai_api_key or "").strip()),
@@ -3364,6 +3417,7 @@ async def transcribe_video(
             pv_vad_method,
             pv_batch_size,
             pv_beam_size,
+            pv_timeline_mode,
             translation_rules,
             translation_batch_size,
             base_name,
