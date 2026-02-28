@@ -897,6 +897,14 @@ def _append_purfview_arg(
     return flag
 
 
+def _purfview_help_has_flag(help_text: str, flag: str) -> bool:
+    if not help_text or not flag:
+        return False
+    low = help_text.lower()
+    target = re.escape(flag.lower())
+    return re.search(rf"(?<![A-Za-z0-9_-]){target}(?![A-Za-z0-9_-])", low) is not None
+
+
 def _run_purfview_xxl_transcribe(
     input_path: str,
     model_name: str,
@@ -926,10 +934,18 @@ def _run_purfview_xxl_transcribe(
         # 一些 Purfview 版本将 --vad_filter/-vad 定义为“必须带值”的参数。
         _append_purfview_arg(cmd, help_text, ["--vad_filter", "--vad", "-vad"], "true")
     elif mode == "off":
-        flag = _append_purfview_arg(cmd, help_text, ["--no_vad_filter", "--no-vad-filter", "--no_vad"])
+        # 兼容性优先：多数版本支持 --vad_filter false；--no_vad_filter 在部分版本会报 unrecognized arguments。
+        prefer_value_style = (
+            not help_text
+            or _purfview_help_has_flag(help_text, "--vad_filter")
+            or _purfview_help_has_flag(help_text, "--vad")
+            or _purfview_help_has_flag(help_text, "-vad")
+        )
+        flag = None
+        if prefer_value_style:
+            flag = _append_purfview_arg(cmd, help_text, ["--vad_filter", "--vad", "-vad"], "false")
         if not flag:
-            # 某些版本仅支持 --vad_filter，尝试显式 false
-            _append_purfview_arg(cmd, help_text, ["--vad_filter"], "false")
+            flag = _append_purfview_arg(cmd, help_text, ["--no_vad_filter", "--no-vad-filter", "--no_vad"])
     method = (vad_method or "").strip()
     if method:
         _append_purfview_arg(cmd, help_text, ["--vad_method", "--vad_alt_method"], method)
