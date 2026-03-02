@@ -428,6 +428,25 @@
       </div>
       <div id="engineConfigPurfview" class="api-config-block" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
         <div class="field">
+          <label for="purfviewPreset">Purfview 参数预设</label>
+          <select id="purfviewPreset">
+            <option value="default" selected>默认（平衡）</option>
+            <option value="speed">速度优先（更快，质量略降）</option>
+            <option value="quality">质量优先（更稳，更慢）</option>
+            <option value="noisy">噪声环境（加强降噪/VAD）</option>
+          </select>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="purfviewDevice">Purfview Device（可选）</label>
+            <input type="text" id="purfviewDevice" placeholder="例如：cuda / cuda:1 / cpu" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="purfviewComputeType">Purfview Compute Type（可选）</label>
+            <input type="text" id="purfviewComputeType" placeholder="例如：auto / float16 / int8" autocomplete="off" />
+          </div>
+        </div>
+        <div class="field">
           <label for="purfviewVadMode">Purfview VAD（可选）</label>
           <select id="purfviewVadMode">
             <option value="auto" selected>自动（使用默认）</option>
@@ -457,7 +476,12 @@
             <input type="text" id="purfviewBeamSize" inputmode="numeric" pattern="[0-9]*" placeholder="留空默认" autocomplete="off" />
           </div>
         </div>
+        <div class="field">
+          <label for="purfviewExtraArgs">Purfview 高级额外参数（可选）</label>
+          <textarea id="purfviewExtraArgs" rows="5" placeholder="每行一个参数，例如：&#10;--temperature 0&#10;--best_of 5&#10;--patience 2&#10;--ff_fftdn 12&#10;--sentence" style="width:100%;padding:0.6rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.9rem;resize:vertical;font-family:inherit;"></textarea>
+        </div>
         <div class="hint" style="margin-top: 0.35rem;">仅在识别引擎选择 Purfview XXL 时生效</div>
+        <div class="hint" style="margin-top: 0.35rem;">高级参数支持 <code>--flag value</code> 或 <code>--flag=value</code>；每行一条。关键参数（如模型、输出目录、语言）会被保护，避免冲突。</div>
       </div>
     </div>
 
@@ -637,7 +661,7 @@
   </div>
 
   <script>
-    const APP_VERSION = "1.14";
+    const APP_VERSION = "1.15";
     document.getElementById("appVersion").textContent = "v" + APP_VERSION;
 
     const uploadZone = document.getElementById("uploadZone");
@@ -647,11 +671,15 @@
     const model = document.getElementById("model");
     const language = document.getElementById("language");
     const engineConfigPurfview = document.getElementById("engineConfigPurfview");
+    const purfviewPreset = document.getElementById("purfviewPreset");
+    const purfviewDevice = document.getElementById("purfviewDevice");
+    const purfviewComputeType = document.getElementById("purfviewComputeType");
     const purfviewVadMode = document.getElementById("purfviewVadMode");
     const purfviewTimelineMode = document.getElementById("purfviewTimelineMode");
     const purfviewVadMethod = document.getElementById("purfviewVadMethod");
     const purfviewBatchSize = document.getElementById("purfviewBatchSize");
     const purfviewBeamSize = document.getElementById("purfviewBeamSize");
+    const purfviewExtraArgs = document.getElementById("purfviewExtraArgs");
     const translationApi = document.getElementById("translationApi");
     const translateTo = document.getElementById("translateTo");
     const openaiApiKey = document.getElementById("openaiApiKey");
@@ -849,11 +877,15 @@
         if (data.translation_api) translationApi.value = data.translation_api;
         if (data.translate_to) translateTo.value = data.translate_to;
         if (data.parallel_file_count) parallelFileCount.value = data.parallel_file_count;
+        if (data.purfview_preset) purfviewPreset.value = data.purfview_preset;
+        if (data.purfview_device != null) purfviewDevice.value = data.purfview_device;
+        if (data.purfview_compute_type != null) purfviewComputeType.value = data.purfview_compute_type;
         if (data.purfview_vad_mode) purfviewVadMode.value = data.purfview_vad_mode;
         if (data.purfview_timeline_mode) purfviewTimelineMode.value = data.purfview_timeline_mode;
         if (data.purfview_vad_method != null) purfviewVadMethod.value = data.purfview_vad_method;
         if (data.purfview_batch_size) purfviewBatchSize.value = data.purfview_batch_size;
         if (data.purfview_beam_size) purfviewBeamSize.value = data.purfview_beam_size;
+        if (data.purfview_extra_args != null) purfviewExtraArgs.value = data.purfview_extra_args;
       } catch (_) {}
     }
 
@@ -867,11 +899,15 @@
           translation_api: translationApi.value,
           translate_to: translateTo.value,
           parallel_file_count: parallelFileCount.value.trim(),
+          purfview_preset: purfviewPreset.value || "default",
+          purfview_device: purfviewDevice.value.trim(),
+          purfview_compute_type: purfviewComputeType.value.trim(),
           purfview_vad_mode: purfviewVadMode.value,
           purfview_timeline_mode: purfviewTimelineMode.value || "auto",
           purfview_vad_method: purfviewVadMethod.value.trim(),
           purfview_batch_size: purfviewBatchSize.value.trim(),
           purfview_beam_size: purfviewBeamSize.value.trim(),
+          purfview_extra_args: purfviewExtraArgs.value,
         };
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
       } catch (_) {}
@@ -952,6 +988,11 @@
     translateTo.addEventListener("change", saveSettings);
     parallelFileCount.addEventListener("change", saveSettings);
     parallelFileCount.addEventListener("blur", saveSettings);
+    purfviewPreset.addEventListener("change", saveSettings);
+    purfviewDevice.addEventListener("change", saveSettings);
+    purfviewDevice.addEventListener("blur", saveSettings);
+    purfviewComputeType.addEventListener("change", saveSettings);
+    purfviewComputeType.addEventListener("blur", saveSettings);
     purfviewVadMode.addEventListener("change", saveSettings);
     purfviewTimelineMode.addEventListener("change", saveSettings);
     purfviewVadMethod.addEventListener("change", saveSettings);
@@ -960,6 +1001,8 @@
     purfviewBatchSize.addEventListener("blur", saveSettings);
     purfviewBeamSize.addEventListener("change", saveSettings);
     purfviewBeamSize.addEventListener("blur", saveSettings);
+    purfviewExtraArgs.addEventListener("change", saveSettings);
+    purfviewExtraArgs.addEventListener("blur", saveSettings);
 
     openaiApiKey.addEventListener("change", saveApiConfig);
     openaiApiKey.addEventListener("blur", saveApiConfig);
@@ -1224,6 +1267,9 @@
         form.append("model_name", model.value);
         form.append("language", language.value);
         if (engine.value === "purfview-xxl") {
+          form.append("purfview_preset", purfviewPreset.value || "default");
+          if (purfviewDevice.value.trim()) form.append("purfview_device", purfviewDevice.value.trim());
+          if (purfviewComputeType.value.trim()) form.append("purfview_compute_type", purfviewComputeType.value.trim());
           form.append("purfview_vad_mode", purfviewVadMode.value || "auto");
           form.append("purfview_timeline_mode", purfviewTimelineMode.value || "auto");
           if (purfviewVadMethod.value.trim()) form.append("purfview_vad_method", purfviewVadMethod.value.trim());
@@ -1231,6 +1277,7 @@
           if (Number.isFinite(pBatch) && pBatch > 0) form.append("purfview_batch_size", String(pBatch));
           const pBeam = parseInt(purfviewBeamSize.value, 10);
           if (Number.isFinite(pBeam) && pBeam > 0) form.append("purfview_beam_size", String(pBeam));
+          if (purfviewExtraArgs.value.trim()) form.append("purfview_extra_args", purfviewExtraArgs.value.trim());
         }
       }
 
