@@ -5,6 +5,7 @@
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import urllib.request
 import urllib.error
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional, List, Tuple
+from typing import Callable, Dict, Any, Optional, List, Tuple, Set
 from urllib.parse import quote
 
 import torch
@@ -70,6 +71,7 @@ TRANSCRIBE_ENGINES = {
 FASTER_WHISPER_MODEL_PREFIX = "Systran/faster-whisper-"
 
 PURFVIEW_XXL_EXE_NAME = "faster-whisper-xxl.exe"
+PURFVIEW_PRESET_OPTIONS = {"default", "speed", "quality", "noisy"}
 
 # 常用语言：code -> 显示名（与 Whisper LANGUAGES 一致）
 LANGUAGES = [
@@ -877,8 +879,10 @@ def _pick_purfview_flag(help_text: str, candidates: List[str]) -> Optional[str]:
     for c in candidates:
         if c.lower() in low:
             return c
-    # 帮助文本拿不到时，回退到首选参数名
-    return candidates[0] if candidates else None
+    # 仅在帮助文本拿不到时才回退，避免把不支持的参数硬塞给可执行文件
+    if not low.strip():
+        return candidates[0] if candidates else None
+    return None
 
 
 def _append_purfview_arg(
@@ -905,16 +909,101 @@ def _purfview_help_has_flag(help_text: str, flag: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_-]){target}(?![A-Za-z0-9_-])", low) is not None
 
 
+def _extract_purfview_help_flags(help_text: str) -> Set[str]:
+    text = (help_text or "").lower()
+    if not text:
+        return set()
+    # 匹配 --flag / -f 形式参数
+    matches = re.findall(r"(?<![\w/])(--[a-z0-9][a-z0-9_-]*|-[a-z0-9][a-z0-9_-]*)", text, flags=re.IGNORECASE)
+    return {m.lower() for m in matches}
+
+
+def _is_negative_numeric_token(token: str) -> bool:
+    return bool(re.fullmatch(r"-\d+(?:\.\d+)?(?:e-?\d+)?", (token or "").strip(), flags=re.IGNORECASE))
+
+
+def _append_purfview_preset_args(cmd: List[str], help_text: str, preset: str) -> None:
+    preset_name = (preset or "default").strip().lower()
+    if preset_name == "speed":
+        _append_purfview_arg(cmd, help_text, ["--batched"])
+        _append_purfview_arg(cmd, help_text, ["--batch_size"], "16")
+        _append_purfview_arg(cmd, help_text, ["--beam_size"], "1")
+        _append_purfview_arg(cmd, help_text, ["--best_of"], "1")
+        _append_purfview_arg(cmd, help_text, ["--word_timestamps", "-wt"], "false")
+        return
+    if preset_name == "quality":
+        _append_purfview_arg(cmd, help_text, ["--beam_size"], "8")
+        _append_purfview_arg(cmd, help_text, ["--best_of"], "5")
+        _append_purfview_arg(cmd, help_text, ["--patience"], "2")
+        _append_purfview_arg(cmd, help_text, ["--word_timestamps", "-wt"], "true")
+        _append_purfview_arg(cmd, help_text, ["--temperature"], "0")
+        return
+    if preset_name == "noisy":
+        _append_purfview_arg(cmd, help_text, ["--vad_filter", "--vad", "-vad"], "true")
+        _append_purfview_arg(cmd, help_text, ["--vad_threshold"], "0.35")
+        _append_purfview_arg(cmd, help_text, ["--ff_fftdn"], "12")
+        _append_purfview_arg(cmd, help_text, ["--ff_speechnorm"])
+        return
+    # default: 不追加
+
+
+def _parse_purfview_extra_args(raw: str, help_text: str) -> List[str]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    supported_flags = _extract_purfview_help_flags(help_text)
+    blocked_flags = {
+        "-h",
+        "--help",
+        "/?",
+        "-m",
+        "--model",
+        "--model_dir",
+        "-o",
+        "--output_dir",
+        "-f",
+        "--output_format",
+        "-l",
+        "--language",
+        "--checkcuda",
+        "-cc",
+        "--version",
+    }
+    tokens: List[str] = []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        chunk = line.strip()
+        if not chunk or chunk.startswith("#"):
+            continue
+        try:
+            tokens.extend(shlex.split(chunk, posix=True))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Purfview 高级参数第 {line_no} 行解析失败：{e}") from e
+    for tok in tokens:
+        if tok == "/?":
+            raise HTTPException(status_code=400, detail="Purfview 高级参数不允许使用 /?。")
+        if tok.startswith("-") and (not _is_negative_numeric_token(tok)):
+            flag = tok.split("=", 1)[0].lower()
+            if flag in blocked_flags:
+                raise HTTPException(status_code=400, detail=f"Purfview 高级参数不允许覆盖关键参数：{flag}")
+            if supported_flags and (flag not in supported_flags):
+                raise HTTPException(status_code=400, detail=f"Purfview 参数不受支持：{flag}")
+    return tokens
+
+
 def _run_purfview_xxl_transcribe(
     input_path: str,
     model_name: str,
     language: str,
     work_dir: str,
     *,
+    preset: str = "default",
+    device: str = "",
+    compute_type: str = "",
     vad_mode: str = "auto",
     vad_method: str = "",
     batch_size: int = 0,
     beam_size: int = 0,
+    extra_args: Optional[List[str]] = None,
     job_id: str,
     cancel_event: Optional[threading.Event] = None,
 ) -> str:
@@ -928,6 +1017,11 @@ def _run_purfview_xxl_transcribe(
     if language and language != "auto":
         cmd += ["-l", language]
     help_text = _get_purfview_help_text(exe_path)
+    _append_purfview_preset_args(cmd, help_text, preset)
+    if device:
+        _append_purfview_arg(cmd, help_text, ["--device", "-d"], device)
+    if compute_type:
+        _append_purfview_arg(cmd, help_text, ["--compute_type", "-ct"], compute_type)
     # VAD 开关：优先按显式选择，auto 时不透传，使用 Purfview 默认行为
     mode = (vad_mode or "auto").strip().lower()
     if mode == "on":
@@ -953,13 +1047,19 @@ def _run_purfview_xxl_transcribe(
         _append_purfview_arg(cmd, help_text, ["--batch_size", "-bs", "--bs"], str(batch_size))
     if beam_size and beam_size > 0:
         _append_purfview_arg(cmd, help_text, ["--beam_size", "--beamsize", "-beamsize"], str(beam_size))
+    if extra_args:
+        cmd.extend(extra_args)
     _log_api_event(
         "purfview_cmd",
         model_name=model_name,
+        preset=preset,
+        device=device,
+        compute_type=compute_type,
         vad_mode=mode,
         vad_method=method,
         batch_size=batch_size,
         beam_size=beam_size,
+        extra_args=extra_args or [],
         cmd_preview=cmd[1:],
     )
     proc = subprocess.Popen(
@@ -1272,11 +1372,15 @@ def _process_job(
     moonshot_api_key: str,
     moonshot_base_url: str,
     moonshot_model: str,
+    purfview_preset: str,
+    purfview_device: str,
+    purfview_compute_type: str,
     purfview_vad_mode: str,
     purfview_vad_method: str,
     purfview_batch_size: int,
     purfview_beam_size: int,
     purfview_timeline_mode: str,
+    purfview_extra_args: List[str],
     translation_rules: str,
     translation_batch_size: int,
     base_name: str = "",
@@ -1426,10 +1530,14 @@ def _process_job(
                 model_name,
                 language,
                 work_dir,
+                preset=purfview_preset,
+                device=purfview_device,
+                compute_type=purfview_compute_type,
                 vad_mode=purfview_vad_mode,
                 vad_method=purfview_vad_method,
                 batch_size=purfview_batch_size,
                 beam_size=purfview_beam_size,
+                extra_args=purfview_extra_args,
                 job_id=job_id,
                 cancel_event=cancel_event,
             )
@@ -1742,6 +1850,35 @@ def _normalize_purfview_timeline_mode(value: Optional[str]) -> str:
     if raw in ("never", "off", "false", "0", "no", "disabled"):
         return "never"
     raise HTTPException(status_code=400, detail="时间轴归一化选项不合法。可用值：auto / always / never")
+
+
+def _normalize_purfview_preset(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return "default"
+    aliases = {
+        "balanced": "default",
+        "normal": "default",
+        "fast": "speed",
+        "faster": "speed",
+        "accurate": "quality",
+        "hq": "quality",
+        "noise": "noisy",
+        "noisy_env": "noisy",
+    }
+    raw = aliases.get(raw, raw)
+    if raw not in PURFVIEW_PRESET_OPTIONS:
+        raise HTTPException(status_code=400, detail="Purfview 预设不合法。可用值：default / speed / quality / noisy")
+    return raw
+
+
+def _normalize_purfview_simple_token(value: Optional[str], *, field_name: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,48}", raw):
+        raise HTTPException(status_code=400, detail=f"Purfview {field_name} 不合法，请仅使用字母/数字/._:-")
+    return raw
 
 
 def _resolve_optional_positive_int(value: Optional[int], *, min_value: int, max_value: int) -> int:
@@ -3319,11 +3456,15 @@ async def transcribe_video(
     moonshot_api_key: str = Form(""),
     moonshot_base_url: str = Form(""),
     moonshot_model: str = Form(""),
+    purfview_preset: str = Form("default"),
+    purfview_device: str = Form(""),
+    purfview_compute_type: str = Form(""),
     purfview_vad_mode: str = Form("auto"),
     purfview_vad_method: str = Form(""),
     purfview_batch_size: int = Form(0),
     purfview_beam_size: int = Form(0),
     purfview_timeline_mode: str = Form("auto"),
+    purfview_extra_args: str = Form(""),
     translation_rules: str = Form(""),
     translation_batch_size: int = Form(0),
 ):
@@ -3346,11 +3487,20 @@ async def transcribe_video(
         raise HTTPException(status_code=400, detail="已选择翻译 API，请同时选择“翻译成”目标语言")
     if translate_to and translate_to != "none" and (not translation_api or translation_api == "none"):
         raise HTTPException(status_code=400, detail="已选择“翻译成”目标语言，请同时选择翻译 API")
+    pv_preset = _normalize_purfview_preset(purfview_preset)
+    pv_device = _normalize_purfview_simple_token(purfview_device, field_name="Device")
+    pv_compute_type = _normalize_purfview_simple_token(purfview_compute_type, field_name="Compute Type")
     pv_vad_mode = _normalize_purfview_vad_mode(purfview_vad_mode)
     pv_vad_method = _normalize_purfview_vad_method(purfview_vad_method)
     pv_batch_size = _resolve_optional_positive_int(purfview_batch_size, min_value=1, max_value=256)
     pv_beam_size = _resolve_optional_positive_int(purfview_beam_size, min_value=1, max_value=32)
     pv_timeline_mode = _normalize_purfview_timeline_mode(purfview_timeline_mode)
+    pv_extra_args: List[str] = []
+    if engine == "purfview-xxl":
+        pv_extra_args = _parse_purfview_extra_args(
+            purfview_extra_args,
+            _get_purfview_help_text(_purfview_xxl_exe_path()),
+        )
 
     available, _, path_or_error = check_ffmpeg_available()
     if not available:
@@ -3394,11 +3544,15 @@ async def transcribe_video(
         gemini_model=gemini_model,
         gemini_thinking_level=gemini_thinking_level,
         moonshot_model=moonshot_model,
+        purfview_preset=pv_preset if engine == "purfview-xxl" else "",
+        purfview_device=pv_device if engine == "purfview-xxl" else "",
+        purfview_compute_type=pv_compute_type if engine == "purfview-xxl" else "",
         purfview_vad_mode=pv_vad_mode if engine == "purfview-xxl" else "",
         purfview_vad_method=pv_vad_method if engine == "purfview-xxl" else "",
         purfview_batch_size=pv_batch_size if engine == "purfview-xxl" else 0,
         purfview_beam_size=pv_beam_size if engine == "purfview-xxl" else 0,
         purfview_timeline_mode=pv_timeline_mode if engine == "purfview-xxl" else "",
+        purfview_extra_args_count=len(pv_extra_args) if engine == "purfview-xxl" else 0,
         translation_batch_size=translation_batch_size,
         has_translation_rules=bool((translation_rules or "").strip()),
         has_openai_api_key=bool((openai_api_key or "").strip()),
@@ -3429,11 +3583,15 @@ async def transcribe_video(
             moonshot_api_key,
             moonshot_base_url,
             moonshot_model,
+            pv_preset,
+            pv_device,
+            pv_compute_type,
             pv_vad_mode,
             pv_vad_method,
             pv_batch_size,
             pv_beam_size,
             pv_timeline_mode,
+            pv_extra_args,
             translation_rules,
             translation_batch_size,
             base_name,
